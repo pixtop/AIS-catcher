@@ -1,6 +1,6 @@
 # Plan: forward CRC-valid but structurally invalid AIS frames (opt-in)
 
-Status: **plan only, no code changed.**
+Status: **implemented on this branch (based on tag v0.70).** See "Implementation notes" at the end for deviations and test results.
 
 **Target: git tag `v0.70`** (`8833c64`, "Bump version to v0.70", 2026-06-19). The tag is identical on `pixtop/AIS-catcher` and upstream `jvde-github/AIS-catcher`. The branch this file lives on is based on master `b6b4ae2`, which is **51 commits after v0.70** and differs substantially (§8). All file:line references below are **at v0.70** unless marked "HEAD".
 
@@ -493,3 +493,31 @@ HEAD changed this area. If the feature is ported to HEAD, the design stays but t
 * **Filter.** `Filter::include(msg, tag)` takes the TAG and has `EXCLUDE_ERRORS`/`ONLY_ERRORS`/`IncludedWithError`. Add `invalid` to that vocabulary instead of `REMOVE_INVALID`. The `Message::invalid` marker is unnecessary.
 * **Decoder layout.** The decoder kernel moved to `Run()` in `AIS.h`, and `canStop()` was renamed `cannotBeValid()`. There is a V2 engine (`ModelEngineV2`, 6 decoders per channel) to plumb as well.
 * **Consumers.** The unguarded shift moved to `DBMS/DatabaseOutput.cpp:714` (shared by PostgreSQL, SQLite and CSV). The community feed is a dedicated `HubStreamer`. The ship DB is `Tracking/DB.cpp:1536`.
+
+---
+
+## 9. Implementation notes
+
+Implemented in four commits on top of `v0.70`, following §2 and using the proposed answer wherever §6 left a question open:
+- PostgreSQL skips flagged frames.
+- There is no viewer counter.
+- HTTP uploads rely on `REMOVE_INVALID`.
+- MMSI 0 is not flagged.
+- `OVERSIZED` frames still flow to the DB.
+- The two keys are independent.
+
+Deviations from §2:
+
+* `Filter::Get()` does not print `remove_invalid`, matching `remove_empty`. Printing it would change the community feed's startup log line under `-X`.
+* The T1 harness landed with the decoder commit rather than the first one, because it needs `Decoder::setValidation()`.
+* The harness also checks the `Filter` (T2): type aliasing, the `POSITION_INTERVAL` history guard, and `REMOVE_INVALID`.
+
+Test results (Linux x64, GCC 13):
+
+* **T1/T2** `scripts/test-invalid-frames.cpp`: all checks pass, also under `-fsanitize=undefined,address` and as a 32-bit (`-m32`) build. Mutation checks confirmed the tests catch these guards being removed: buffer clear, tail clear, JSONAIS body skip, Filter history guard, type aliasing.
+* **T3** default-output gate: the v0.70 binary and the patched binary decoded a synthetic GMSK recording (288 kS/s CF32, channel A, 16 crafted frames). Output was **identical for every combination** of `-m 0/1/2/4` and `-o 1..6` (NMEA, FULL, JSON_NMEA, JSON_SPARSE, JSON_FULL, JSON_ANNOTATED), once timestamps were stripped. NMEA text input (`-r txt`, including the flagged sentences) was also identical.
+* **T4** end-to-end with `-go REPORT_INVALID on QUICK_RESET off -o 3`: all 16 frames came out once each with the expected `error` (0, 12, 20, 36, 68, 128).
+* **Web viewer**, looping the same recording with `-N`: baseline and patched builds show the same 3 ships. The patched build's counters additionally include only the two `OVERSIZED` frames. The frames flagged invalid never reach them.
+* **Builds:** the full CMake build passes with PostgreSQL (libpq 16) and NMEA2000 enabled. `Model.cpp`, `DB.cpp`, `PostgreSQL.cpp`, `N2KStream.cpp` and `Main.cpp` also pass a `-m32` syntax check. **Not tested here:** MSVC/Windows, real armhf hardware, a real RF recording (T5 sensitivity A/B).
+
+Caution for manual testing: at v0.70, `-N` switches the aiscatcher.org community feed on unless `-X off` is given.
