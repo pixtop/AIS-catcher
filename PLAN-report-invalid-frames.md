@@ -1,58 +1,71 @@
 # Plan: forward CRC-valid but structurally invalid AIS frames (opt-in)
 
-Status: **plan only, no code changed.** Target tree: this checkout (HEAD `b6b4ae2`, `VERSION "v0.70"`, no git tags in the clone).
+Status: **plan only, no code changed.**
+
+**Target: git tag `v0.70`** (`8833c64`, "Bump version to v0.70", 2026-06-19). The tag is identical on `pixtop/AIS-catcher` and upstream `jvde-github/AIS-catcher`. The branch this file lives on is based on master `b6b4ae2`, which is **51 commits after v0.70** and differs substantially (§8). All file:line references below are **at v0.70** unless marked "HEAD".
 
 This file is a working document. It is not meant to go upstream. Delete it when the feature lands.
 
 ---
 
-## 0. Read first: the checkout differs from the briefing
+## 0. Briefing facts, re-checked at v0.70
 
-I re-checked every "verified fact" against the code. Several do not hold in this tree, and two of them change the design. Please confirm the baseline (see Open question Q1) before implementation starts.
+Every fact was checked in the source. The behaviour was also measured with a probe that drives `AIS::Decoder` with synthetic bit streams (appendix).
 
-| Briefing says | Code actually says | Impact |
+| Briefing says | At v0.70 | Verdict |
 |---|---|---|
-| `processData()` only logs `Debug()` on validation failure; it does not call `buildNMEA()` | `Marine/AIS.cpp:86-98`: it **does** call `msg.buildNMEA(tag)`, then Debug-logs type, length and each sentence. There is no `Send()`. It still returns `true` (which resets sibling decoders). | Small. The NMEA build cost already exists on this path. |
-| `Message::validate()` at `Message.cpp:396`, `ml[]` table | `Marine/Message.cpp:423`, signature `validate(TAG &tag)`. Length 0 returns true. It rejects `len < 38 \|\| len > 1064`, `type ∉ 1..28`, `len < minimum[type-1]`, and **`mmsi() == 0`**. On success it also sets `UNDERSIZED`/`OVERSIZED` in `tag.quality`. | The reason set gains "MMSI 0". Upstream already forwards 0-bit frames. |
-| `Decoder::canStop()` | Called `cannotBeValid(int)` (`AIS.cpp:117`), invoked per bit from `Run()` at `AIS.h:172`. | Naming only. |
-| Oversized frames are aborted at "24+ bits longer" than standard | `END = 24` covers the 16 FCS bits plus the closing flag. A frame is aborted once its payload reaches **standard + 2 bits**. **Measured:** a 169-bit type 1 frame passes (flag `OVERSIZED`), a 170-bit one is dropped. The type check fires for payloads of 8 bits or more. The MMSI check fires for payloads of 40 bits or more. | Changes the threshold wording in tests and docs. |
-| `QuickReset` hard-coded `true` at `AIS.h:47`, no key | ✔ Correct. | — |
-| `TAG` has `uint32_t error` (NONE/NOTOK/NMEA_CHECKSUM); no `quality` field | **No `error` field.** `TAG::quality` is a `uint16_t` (`Library/Common.h:278`). Bits 0-6 are reception marks (plausible, confirmed, suspect, duplicate, echo, late, dense). Bits 7-8 are "reserved" upstream. Bit 9 is `CHECKSUM` (512), bit 10 `UNDERSIZED` (1024), bit 11 `OVERSIZED` (2048). The mask `MESSAGE_QUALITY_ERRORS` covers bits 9-11. **Free: bits 12-15.** | The new flag goes into `quality`, not into a new field. |
-| Error only serialised by JSONAIS; `getNMEAJSON()` omits it | `quality` is emitted when non-zero by **JSONAIS** (`JSONAIS.cpp:1260`), **`getNMEAJSON()`** (`Message.cpp:153`, the JSON_NMEA format), and **BINARY_NMEA** (flag `0x10`, `Message.cpp:368/398`). NMEA, NMEA_TAG and FULL do not carry it. | **Requirement 4 is already met upstream.** |
-| Unguarded `1 << msg.type()` at `DBMS/PostgreSQL.cpp:524` | It is at `DBMS/DatabaseOutput.cpp:714` (`entry.type_bit`), shared by the PostgreSQL, SQLite and CSV backends. The guards in `Statistics.h:92`, `Prometheus.cpp:59` and `DB.cpp:1541` exist as described. | Different file. |
-| Frames under 38 bits expose **stale** bits from earlier frames | `msg.clear()` zeroes the buffer at every start flag (`AIS.h:131`). Bits past `nBits` are **this frame's** 16 FCS bits plus the first 7 bits of the closing flag (`0111111`), then zeros. The garbage is deterministic, not stale. For a 0-bit frame the FCS is `0x0000`, so `type()=0` and `mmsi()=2064384` (`0x7E<<14`). **Measured.** Upstream already emits these as "empty" messages. | Requirement 6 is still needed, but the cause is different. |
+| `processData()`: validate fails → only `Debug()`, no `buildNMEA()`/`Send()`, returns true | `AIS.cpp:85-93` | ✔ |
+| `Message::validate()` at `Message.cpp:396`: accepts length 0, rejects type ∉ 1..28 and length < `ml[]` | ✔ exactly. It has **no** MMSI check and **no** `< 38` check. MMSI 0 frames are sent as valid (**measured**). | ✔, with the note on MMSI 0 |
+| `canStop()` aborts before CRC: type 0/>28, MMSI > 999999999, frame "24+ bits longer" | `AIS.cpp:111`, called at `AIS.cpp:222`. `END = 24` is the 16 FCS bits plus the closing flag. **Measured** trigger points, in payload bits: type check when payload ≥ 8, MMSI check when payload ≥ 40, size check at **standard + 2** (type 1: 169 bits passes, 170 is dropped). | ✔ rules; threshold wording corrected |
+| `QuickReset` hard-coded true at `AIS.h:47`, no key | ✔ | ✔ |
+| `TAG::error` (`uint32_t`): NONE=0, NOTOK=1 (unused), NMEA_CHECKSUM=2 (NMEA input only); no `quality` | `Common.h:225-227,255` ✔. The RF path **never touches `tag.error`**. `KEY_ERROR` has an index lookup table ("None", "Undefined Error", "NMEA Checksum Error", `Keys.cpp:175`). It is bounds-checked (`Writer.h:823`), so larger values simply get no `text` annotation. | ✔ |
+| `tag.error` serialised only by JSONAIS; not by `getNMEAJSON()` | `JSONAIS.cpp:1111` ✔. `getNMEAJSON()` (`Message.cpp:91`) has no error key. BINARY_NMEA does not carry it either (flags 0x01/0x02 only). | ✔ |
+| Statistics, Prometheus, DB skip types outside 1..28; `PostgreSQL.cpp:524` does an unguarded `1 << msg.type()` | `Statistics.h:81`, `Application/Prometheus.cpp:59`, `DB.cpp:1129` (also skips MMSI 0), `PostgreSQL.cpp:524` ✔. `DB.cpp:994` `1 << type` is behind the guard. | ✔ |
+| Frames < 38 bits read stale bits as type/MMSI | ✔ **Measured.** At v0.70 the decoder never clears `msg`. Bits past `payload + 16 FCS + 7 flag bits` are left over from earlier frames. A 0-bit frame reports MMSI 2066240 after a type 1 frame and 2070824 after a type 5 frame. **`getNMEAJSON()` prints `mmsi`/`type` whenever length > 0** (`Message.cpp:171`), and so does JSONAIS (`:1138`). The same leftovers also appear in JSONAIS body fields of under-length frames. | ✔, and worse than stated |
 
-Relevant infrastructure the briefing did not mention (reused by this plan):
+Additional v0.70 facts that shape the design:
 
-* `AIS::Filter` (`Message.cpp:861-1265`) already has `EXCLUDE_ERRORS` (undersized, oversized, checksum, all, none), `ONLY_ERRORS`, and a three-way result: `Included`, `IncludedWithError`, `NotIncluded`. Message outputs only pass `Included`. The ship DB treats `IncludedWithError` as "count it but do not touch vessel state".
-* `validate()` is also called from the NMEA text, multipart and binary input paths (`NMEA.cpp:119, 462, 827`). Any change to its **return value** changes NMEA-input behaviour. This plan changes only its side effects on `tag.quality`, never its return value.
+* `AIS::Filter::include(const Message&)` gets **no `TAG`** (`Message.cpp:1015`). About 20 call sites use it. The filter therefore cannot see `tag.error`.
+* The `own_interval`, `position_interval` and `unique_interval` history blocks run **even with FILTER off** (`Message.cpp:1017-1048`).
+* The type filter uses `msg.type() & 31` (`:1130`). Type 33 aliases to 1, and types 29-31 pass `allow == all`.
+* The community feed (`-X`) is a plain `TCPClientStreamer` configured in `RunState.h:75-89` (FILTER on, REMOVE_EMPTY on). There is no dedicated class to hook.
+* Models with decoders: `ModelBase`, `ModelStandard`, `ModelDefault` (v1 base, default), `ModelChallenger` (v1 high), and `ModelDiscriminator` (dev, derives `Model`). There is **no V2 engine** at v0.70.
+* `ModelFrontend::Get()` prints all of its settings (`Model.cpp:403-416`), and that line appears in the `-v` log.
+* `MaxBits = MAX_AIS_LENGTH = 1024`, so the maximum payload is 1001 bits.
 
 ---
 
 ## 1. Design summary
 
-With the option on, a frame that passes CRC-16 but fails structural checks is converted to NMEA and sent to the message outputs like any other frame. It carries `quality` bit 12 (`INVALID`) plus a 2-bit reason code. The decoder's early-abort heuristic (`QuickReset`) gets its own key so that unknown types, out-of-range MMSIs and oversized frames get as far as the CRC check. State-keeping consumers (ship DB, web viewer, statistics, Prometheus, database backends, NMEA 2000 output, the community feed) skip flagged frames. Zeek sees everything and decides.
+With the option on, a CRC-valid frame that fails structural checks is:
+
+* converted to NMEA and sent to message outputs;
+* flagged in `tag.error` with `INVALID` plus exactly one reason bit;
+* marked on the `Message` object, so TAG-less consumers such as `Filter` can recognise it.
+
+`quick_reset` gets its own key so that unknown types, out-of-range MMSIs and oversized frames reach the CRC check. With it off, frames the heuristic used to kill are flagged instead of passing as valid. State-keeping consumers (ship DB, web viewer, statistics, Prometheus, PostgreSQL, NMEA 2000) and the community feed never see flagged frames. Zeek sees everything and decides.
 
 ### R1: Opt-in configuration
 
-Two **engine (model) settings**, handled in `ModelFrontend::SetKey` beside `FP_DS`, `DROOP` and similar:
+Two model settings, handled in `ModelFrontend::SetKey` beside `FP_DS`, `DROOP` and similar, plus one filter setting:
 
-| Key | Default | Meaning |
-|---|---|---|
-| `report_invalid` | `off` | Send CRC-valid frames that fail validation, flagged in `quality`. |
-| `quick_reset` | `on` | Abort frames early when `cannotBeValid()` says they cannot be valid AIS (upstream behaviour). |
+| Key | Scope | Default | Meaning |
+|---|---|---|---|
+| `report_invalid` | model (`-go`) | `off` | Send CRC-valid frames that fail validation, flagged in `error`. Also clears the frame buffer per frame (R6). |
+| `quick_reset` | model (`-go`) | `on` | Abort frames early when `canStop()` says they cannot be valid (upstream behaviour). |
+| `remove_invalid` | output filter | `off` | With `FILTER on`, drop flagged frames on that output, like `REMOVE_EMPTY`. The community feed gets it `on`. |
 
-Why engine-level, not global:
+Why model scope for the first two:
 
 * Decoders live inside models, and `QuickReset` is a per-decoder member.
-* This matches the existing `-go` and `"engines": [{ "settings": {…} }]` pattern.
-* It allows an A/B test in **one process**: two models on the same device, one with `quick_reset off` (see T5).
+* The `-go` / `"model": {…}` pattern already exists for decoder knobs.
+* It allows an A/B test in **one process**: two models on one device, one of them with `QUICK_RESET off` (T5).
 
-Why two keys and not one:
+Why two separate keys:
 
-* `quick_reset off` alone is useful. Oversized frames then arrive flagged `OVERSIZED` without switching on invalid-frame output.
-* `report_invalid on` alone still reports short, below-minimum-length and MMSI-0 frames.
-* For Zeek, set **both**.
+* `quick_reset off` alone is useful: oversized frames arrive flagged `OVERSIZED` without switching on invalid-frame output.
+* `report_invalid on` alone still reports SHORT and LENGTH frames, and TYPE frames under 8 payload bits.
+* For Zeek, set both.
 
 Command line (`-go` applies to the last `-m` model, or to the default model it creates):
 
@@ -60,116 +73,115 @@ Command line (`-go` applies to the last `-m` model, or to the default model it c
 AIS-catcher -d 0 -go REPORT_INVALID on QUICK_RESET off -u 127.0.0.1 10110 MSGFORMAT JSON_NMEA
 ```
 
-JSON config (receiver block):
+JSON config (v0.70 syntax, `Config.cpp:119`: settings sit directly in the `model` object):
 
 ```json
-"engines": [ { "type": "v1_base", "settings": { "report_invalid": "on", "quick_reset": "off" } } ]
+"model": { "active": true, "report_invalid": "on", "quick_reset": "off" }
 ```
 
-`ModelFrontend::Get()` appends `report_invalid ON` / `quick_reset OFF` only when non-default, so the default `Model #…` log line stays byte-identical. `ModelDiscriminator` (development model `-m 3`, derives from `Model`) does not get the keys and throws the standard "setting not supported" error. That is acceptable.
+Excluding flagged frames from one output: `-u host port FILTER on REMOVE_INVALID on`.
+
+`ModelFrontend::Get()` appends ` report_invalid ON` / ` quick_reset OFF` **only when non-default**, so the default `-v` log line is byte-identical. `ModelDiscriminator` does not get the keys and throws the standard "not supported" error, which is acceptable for a dev model.
 
 ### R2: Error bits
 
-Layout, chosen to keep one spare bit for the later CRC-failure feature:
+`TAG::error` is a `uint32_t` with only bits 0-1 in use, so there is room for **independent bits**:
 
-| Bits | Name | Value(s) |
+| Value | Constant | Set when |
 |---|---|---|
-| 12 | `MESSAGE_QUALITY_INVALID` | 4096. The frame passed CRC-16 but failed structural validation. |
-| 13-14 | reason code (valid only when bit 12 is set) | `0` **SHORT**: 1-37 bits, header incomplete (also the unreachable `> 1064`) · `1` **TYPE**: type 0 or 29-63 · `2` **LENGTH**: below the per-type minimum (`minimum[]` table) · `3` **MMSI**: MMSI 0, or MMSI > 999 999 999 (RF path only, see §2.4) |
-| 15 | *left free* | Keep it for the CRC-failure feature. |
+| 4 | `MESSAGE_ERROR_INVALID` | Umbrella: CRC-valid, failed structural checks. Always set together with exactly one reason below. |
+| 8 | `MESSAGE_ERROR_INVALID_SHORT` | 1-37 payload bits. The header is incomplete, so type and MMSI are **not reported**. |
+| 16 | `MESSAGE_ERROR_INVALID_TYPE` | type 0 or 29-63 (≥ 38 bits) |
+| 32 | `MESSAGE_ERROR_INVALID_LENGTH` | type 1..28 but below `ml[type-1]` |
+| 64 | `MESSAGE_ERROR_INVALID_MMSI` | MMSI > 999 999 999. Only reachable with `quick_reset off`. |
+| 128 | `MESSAGE_ERROR_OVERSIZED` | **Not** invalid. The frame passed `validate()` but ran past the `canStop()` size limit for its type. Only reachable with `quick_reset off`. |
 
-Resulting `quality` values (other bits permitting): SHORT 4096, TYPE 12288, LENGTH 20480, MMSI 28672. In Zeek: `if (q & 4096) reason = (q >> 13) & 3;`
+Resulting `error` values: SHORT 12, TYPE 20, LENGTH 36, MMSI 68, OVERSIZED 128. Bit 1 (`NMEA_CHECKSUM`) never occurs on the RF path, so Zeek sees exactly these values.
 
-Evaluation of the alternatives:
+Evaluation of the options:
 
-* **Bit 12 only.** Zeek can recompute SHORT, TYPE and MMSI from the NMEA payload. LENGTH, however, depends on AIS-catcher's private `minimum[]` table, which Zeek would have to copy and keep in sync. That makes the reason worth carrying.
-* **Four independent bits (12-15).** Reasons are **mutually exclusive by construction**, because `validate()` returns at the first failed check. Independent bits gain nothing and leave no bit for the CRC feature.
-* **Widening `quality` to 32 bits.** Rejected. It breaks the 2-byte field in the BINARY_NMEA wire format (flag `0x10`), which dAISy-catcher and aiscatcher.org also parse.
-* **Bits 7-8.** Upstream marks them reserved, which is a rebase hazard.
+* **A single bit** would make Zeek re-derive the reason. LENGTH needs a copy of AIS-catcher's `ml[]` table, and SHORT needs the fill bits. Sending the reason is cheap and avoids that drift.
+* **A reason code** (2 bits) would also work, because reasons are mutually exclusive: `validate()` stops at the first failure. With 30 free bits, independent bits are simpler for Zeek (`error & 16`) and for any future filter vocabulary.
+* **The umbrella bit** gives consumers one test (`& 4`) and leaves room for reasons added later.
+* **The lookup table** (`LookupTable_message_error_types`) is index-based and was never right for bitmasks. Leave it alone: it is bounds-checked, and JSON_ANNOTATED just omits `text` for the new values.
 
-`MESSAGE_QUALITY_INVALID` is added to `MESSAGE_QUALITY_ERRORS`, so `ONLY_ERRORS` and `EXCLUDE_ERRORS all` include it. `EXCLUDE_ERRORS` gains the name `invalid`, so an operator can remove flagged frames from one output with `FILTER on EXCLUDE_ERRORS invalid`.
+**MMSI 0 is deliberately not flagged.** v0.70 already sends MMSI-0 frames as valid, and flagging them would change default output. Zeek can test `mmsi == 0` itself (Q6).
 
 ### R3: QuickReset: disable fully or partially?
 
-What each `cannotBeValid()` rule blocks (measured with the probe in the appendix):
+What each `canStop()` rule blocks at v0.70 (measured; appendix):
 
-| Rule | Fires when | Blocks frames that… | What we need |
+| Rule | Fires at | Blocks frames that… | With it off, the frame is… |
 |---|---|---|---|
-| type 0 or > 28 | position 30 (payload ≥ 8 bits) | …would be flagged TYPE | **off** |
-| MMSI > 999 999 999 | position 62 (payload ≥ 40) | …**pass `validate()`**. They would be emitted unflagged; the probe shows `quality=0`. | **off**, plus a new MMSI check (§2.4) |
-| per-type maximum | payload ≥ max + 2 (types 1-5, 7, 9-11, 15, 16, 18-25, 27, 28) | …pass `validate()`. `OVERSIZED` is only set for types 1-5, 9, 11, 18, 19, 23, 27, 28. Types 7, 10, 15, 16, 20, 21, 22, 24 and 25 would be emitted unflagged; the probe shows a type 10 frame of 80 bits with `quality=0`. | **off**, plus an `overrun` latch that sets `OVERSIZED` |
+| type 0 or > 28 | position 30 (payload ≥ 8) | …would fail `validate()` anyway | flagged TYPE |
+| MMSI > 999 999 999 | position 62 (payload ≥ 40) | …**pass** `validate()`. **Measured: sent unflagged.** | flagged MMSI (new decoder check, §2.4) |
+| per-type maximum | payload ≥ standard + 2 | …pass `validate()`. **Measured: a type 10 of 80 bits is sent unflagged.** | flagged OVERSIZED via the `overrun` latch (§2.3) |
 
-**Recommendation: one on/off switch.** Do not add a partial mode.
+**Recommendation: one on/off switch, no partial mode.**
 
-* The type rule is the one that kills most noise candidates. It fires early, on about 56 % of random type values, and it is exactly the rule we must switch off.
-* The remaining rules fire late and rarely in noise, so keeping only them buys little sensitivity while adding a tri-state setting to test and document.
+* The type rule does most of the noise killing. It fires early and matches about 36/64 of random type values. It is exactly the rule that must go.
+* The size and MMSI rules fire late and rarely in noise, so a partial mode that keeps them saves little and adds a tri-state setting to test and document.
+* With `quick_reset off`, `canStop()` is still evaluated. It **latches `overrun`** instead of aborting, so no formerly-killed frame can leave unflagged.
 
-With `quick_reset off`, `cannotBeValid()` is still evaluated. When it fires, it latches `overrun` instead of aborting. If the frame then passes CRC and `validate()`, the decoder sets `OVERSIZED`. That turns every frame the heuristic would have killed into either `INVALID` or `OVERSIZED`, and none of them leaves unflagged.
+### R4: Error field in JSON_NMEA: only when non-zero
 
-### R4: Error field in JSON_NMEA
+Add `"error":N` to `getNMEAJSON()` **only when `tag.error != 0`**, right after `ipv4`.
 
-**Already implemented upstream** (`Message.cpp:153-157`): `"quality":N` is added only when non-zero. **Keep "only when non-zero".**
-
-* **Backward compatible.** Output for valid, unflagged frames stays byte-identical, including in opt-in mode.
-* **Consistent.** JSONAIS (JSON_FULL, JSON_SPARSE, JSON_ANNOTATED), BINARY_NMEA and the NMEA/JSON input parser (`NMEA.cpp:575`) all treat an absent key as 0.
-* **Cheap.** It adds nothing to about 99.9 % of lines.
+* **Backward compatible.** Every line that is emitted today stays byte-identical, including valid frames in opt-in mode. Parsers keyed on exact output and dashboards are unaffected.
+* **Consistent.** JSONAIS already emits `error` only when non-zero (`JSONAIS.cpp:1111`). Upstream later added `quality` to `getNMEAJSON()` with the same only-when-non-zero rule (HEAD `Message.cpp:153`), which confirms the convention and eases a future port.
 * **Zeek rule:** absent means 0.
 
-Remaining work is documentation only: update the `KEY_QUALITY` description in `KeyDefs.h`.
+"Always" would add 10 bytes to every line and change all default JSON_NMEA output. That violates requirement 1.
 
-Plain NMEA and NMEA_TAG **cannot** carry the flag, so the Zeek feed must use `JSON_NMEA` (or `JSON_FULL`).
+Plain NMEA and NMEA_TAG cannot carry the flag, and neither can BINARY_NMEA at v0.70. **The Zeek feed must use `JSON_NMEA` (or `JSON_FULL`).**
 
 ### R5: Which consumers see flagged frames
 
-**Recommendation: message outputs only.**
+**Recommendation: user-configured message outputs only.**
 
-* **Hard-skip:** every consumer that builds state keyed on type or MMSI, anything that publishes to third parties, and NMEA 2000.
-* **Pass:** user-configured message outputs. They can still exclude flagged frames per output with the existing filter.
+* Hard-skip in every consumer that builds per-MMSI or per-type state, and in NMEA 2000.
+* The community feed skips flagged frames via `REMOVE_INVALID on`.
+* Other outputs pass them, with `REMOVE_INVALID` available per output.
 
-The full audit is in §3.
+Why:
 
-Rationale:
+* The vessel table, tracks, coverage radar, per-type counters and Prometheus labels assume a trustworthy type and MMSI.
+* A LENGTH-flagged type 1 with a real MMSI would move a real ship from zero padding.
+* The ship DB (`Tracking/DB`) is the single entry point for the web viewer: histories, counters, SSE and Prometheus all hang off it (`WebViewer.cpp:642-647, 934, 950`). **One guard there covers all of them.**
 
-* The briefing's goal is "Zeek decides". Vessel tables, tracks, coverage radar, the per-type counters and the Prometheus labels all assume a trustworthy type and MMSI. Feeding them junk corrupts the operator display. With MMSI-reason frames, a crafted frame could also move a real ship.
-* The ship DB (`Tracking/DB`) is the single entry point for the whole web viewer: ships, paths, histories, counters, SSE and Prometheus all hang off it (`ReceiverTracker::wireStreams`, `ViewerSettings.cpp:145-149`). **One guard there covers all of them.**
+Audit in §3.
 
-### R6: Short frames
+### R6: Short frames and stale bits
 
-* **Clear the tail.** When `report_invalid` is on, `processData()` zeroes the bits from `nBits` to `len + 7` (the FCS and closing-flag bits, at most 23 iterations) after the CRC check and before `validate()`. `type()`, `repeat()`, `mmsi()` and `getHash()` then read zeros instead of FCS or flag bits. A 0-bit frame becomes type 0 / MMSI 0 rather than MMSI 2064384. This is gated on the option: doing it unconditionally would change default JSON for valid-but-undersized frames, whose fields past `length` currently decode FCS bits.
-* **Guard JSONAIS.** For flagged frames, emit `type`, `repeat` and `mmsi` only when `length >= 38`, and skip the per-type body decode unless the reason is MMSI. The body fields would otherwise be decoded from zero padding and look like real data (for example `lat: 0`). For MMSI-reason frames the payload is complete, so the body is decoded; Zeek may want the position of an MMSI-0 transmitter.
-* **Not chosen: guarding the getters.** `type()` and `mmsi()` are hot inline getters used everywhere. Guarding them would change default behaviour and cost cycles on every message.
+1. **Clear the buffer per frame (opt-in only).** When `report_invalid` is on, call `msg.clear()` at the STARTFLAG→DATAFCS transition (`AIS.cpp:179`). Upstream made this unconditional after v0.70 (HEAD `AIS.h:131`), so the patch follows the upstream direction. It is gated here because doing it unconditionally would change default output: today, JSONAIS fields past the end of an under-length valid frame decode leftover bits from earlier frames. The cost is a 132-byte memset per start-flag candidate, a few per second per decoder.
+2. **Clear the tail after CRC (opt-in only).** Zero bits `nBits … len+7` (the 16 FCS bits plus 7 flag bits) before building output. `type()`, `repeat()`, `mmsi()` and `getHash()` then read zeros. A 0-bit frame becomes type 0 / MMSI 0.
+3. **Guard the serialisers for SHORT frames.** In `getNMEAJSON()` and JSONAIS, emit `mmsi`/`type` (and `repeat`, `country`) only when `length > 0 && !(error & SHORT)`.
+4. **Skip the JSONAIS body decode for SHORT and LENGTH frames.** Those fields would come from zero padding and look like real data (e.g. `lat: 0`). MMSI-flagged frames are complete, so their body is decoded; TYPE frames have no `case` in the switch anyway.
+
+Not chosen: **guarding the getters.** `type()` and `mmsi()` are hot inline getters used everywhere. Guarding them would change default behaviour and cost cycles on every message.
 
 ---
 
-## 2. Changes by file
+## 2. Changes by file (v0.70)
 
-Estimated diff: about 150 lines of production code plus the new test file. Split into four commits (§2.12) to ease rebasing.
+Estimated diff: about 130 lines of production code plus the new test file. The commit order is in §2.12.
 
 ### 2.1 `Source/Library/Common.h`
-* After `MESSAGE_QUALITY_OVERSIZED`, add `MESSAGE_QUALITY_INVALID = 1 << 12`, `MESSAGE_INVALID_MASK = 3 << 13`, and the codes `MESSAGE_INVALID_SHORT/TYPE/LENGTH/MMSI = 0/1/2/3 << 13`.
-* Add `MESSAGE_QUALITY_INVALID` to `MESSAGE_QUALITY_ERRORS`.
-* Update the bit comment: "bits 7-8 reserved, 12 invalid, 13-14 invalid reason, 15 free".
+* After `MESSAGE_ERROR_NMEA_CHECKSUM` (`:227`), add the six constants from R2 (`const int`, matching the existing style).
 
-### 2.2 `Source/Marine/Message.cpp`: `Message::validate(TAG&)`
-* On entry, clear `INVALID | MESSAGE_INVALID_MASK` along with `UNDERSIZED | OVERSIZED`.
-* Replace each `return false;` with a local helper that sets `INVALID | reason` and returns false. Order and conditions stay unchanged. **The return value is unchanged on every path, so NMEA-input behaviour is unchanged.** NMEA paths drop failed messages and `tag.clear()` per line (`NMEA.cpp:503/683/988/1050`), so the bits never leak.
+### 2.2 `Source/Marine/Message.h`
+* Add a member `bool invalid = false;` with `void setInvalid(bool b)` and `bool isInvalid() const`. It is the TAG-free marker used by `Filter` and the state consumers. The RF decoder sets it on every frame. Other producers (NMEA, N2K, …) never touch it, so it stays `false`.
+* Add `bool remove_invalid = false;` to `class Filter` (`:344`).
 
-### 2.3 `Source/Marine/Message.cpp`: `AIS::Filter`
-* `SetOptionKey(EXCLUDE_ERRORS)`: accept `invalid` and update the error text. `Get()`: print `invalid`.
-* `include()`: compute `bool invalid = tag.quality & MESSAGE_QUALITY_INVALID` once.
-  * Skip the `own_interval`, `position_interval` and `unique_interval` history updates for flagged frames. These blocks run **even with FILTER off**. Without the guard, a junk or crafted frame carrying a real MMSI would suppress that ship's genuine position reports, and one carrying the own MMSI would suppress own-vessel output.
-  * Fix type aliasing: `unsigned type = msg.type() & 31` maps type 33 to 1 and lets it through `ALLOW_TYPE 1`. Replace it with `type < 32 ? ((1U << type) & allow) : allow == all`. Default behaviour is identical, because no reachable default frame has type ≥ 32.
-
-### 2.4 `Source/Marine/AIS.h`: `Decoder`
-* Add members `bool ReportInvalid = false; bool overrun = false;`.
-* Add a setter `void setValidation(bool report_invalid, bool quick_reset)`.
-* In `Run()`, set `overrun = false;` next to `msg.clear()` (STARTFLAG to DATAFCS).
-* Replace `if (position == MaxBits || (QuickReset && cannotBeValid(position)))` with:
+### 2.3 `Source/Marine/AIS.h` / `AIS.cpp`: `Decoder`
+* `AIS.h`: add `bool ReportInvalid = false; bool overrun = false;` beside `QuickReset` (`:47`), and a public `void setValidation(bool report_invalid, bool quick_reset)`.
+* `AIS.cpp:179` (STARTFLAG→DATAFCS): add `overrun = false; if (ReportInvalid) msg.clear();`.
+* `AIS.cpp:222`: replace `if (position == MaxBits || (QuickReset && canStop(position)))` with:
 
 ```cpp
 if (position == MaxBits)
 	NextState(State::TRAINING, 0);
-else if (cannotBeValid(position))
+else if (canStop(position))
 {
 	if (QuickReset)
 		NextState(State::TRAINING, 0);
@@ -178,106 +190,125 @@ else if (cannotBeValid(position))
 }
 ```
 
-With `QuickReset == true` this is equivalent to today. It costs one extra branch per bit only when the option is off.
+This is equivalent to today when `QuickReset` is true.
 
-### 2.5 `Source/Marine/AIS.cpp`: `Decoder::processData()`
+### 2.4 `Source/Marine/AIS.cpp`: `processData()` (`:65-96`)
 
 ```cpp
-tag.quality &= ~MESSAGE_QUALITY_CHECKSUM;
+tag.error &= ~(MESSAGE_ERROR_INVALID | MESSAGE_ERROR_INVALID_SHORT | MESSAGE_ERROR_INVALID_TYPE |
+			   MESSAGE_ERROR_INVALID_LENGTH | MESSAGE_ERROR_INVALID_MMSI | MESSAGE_ERROR_OVERSIZED);
 if (ReportInvalid)
 	for (int i = nBits; i < len + 7; i++)
 		msg.setBit(i, false); // FCS and flag bits must not read as type/MMSI
 
-bool valid = msg.validate(tag);
-if (valid && msg.getLength() && msg.mmsi() > 999999999)
+bool valid = msg.validate();
+int reason = 0;
+if (!valid)
+	reason = nBits < 38 ? MESSAGE_ERROR_INVALID_SHORT
+		   : (msg.type() < 1 || msg.type() > 28) ? MESSAGE_ERROR_INVALID_TYPE
+		   : MESSAGE_ERROR_INVALID_LENGTH;
+else if (nBits && msg.mmsi() > 999999999)
 {
-	tag.quality |= MESSAGE_QUALITY_INVALID | MESSAGE_INVALID_MMSI;
+	reason = MESSAGE_ERROR_INVALID_MMSI;
 	valid = false;
 }
-else if (valid && overrun)
-	tag.quality |= MESSAGE_QUALITY_OVERSIZED;
+else if (overrun)
+	tag.error |= MESSAGE_ERROR_OVERSIZED;
 
+msg.setInvalid(!valid);
 if (valid || ReportInvalid)
 {
+	if (!valid)
+		tag.error |= MESSAGE_ERROR_INVALID | reason;
 	msg.buildNMEA(tag);
 	Send(&msg, 1, tag);
 }
 else
-{ /* unchanged Debug() logging */ }
-return true; // unchanged: still resets sibling decoders
+	Debug() << ...; // unchanged
+return true;         // unchanged: resets sibling decoders
 ```
 
-Default-identity argument:
-
+**Why the default output is identical.**
 * With `QuickReset` on, `overrun` is never set.
-* An MMSI above 999 999 999 cannot pass `validate()`. Every frame with a payload of 40 bits or more is aborted at position 62, and payloads of 38-39 bits fail the minimum length (the smallest is 40).
-* The MMSI range check lives here and not in `validate()`, so NMEA input keeps accepting such MMSIs as it does today.
+* An MMSI above 999 999 999 cannot pass `validate()` there. Every payload of 40 bits or more is aborted at position 62, and payloads of 38-39 bits are below every `ml[]` entry (the minimum is 40).
+* The `error &=` only clears bits the RF path never set before.
+* `validate()` and the NMEA-input paths (`NMEA.cpp:112, 447, 756`) are **untouched**, so NMEA input keeps accepting MMSI > 999 999 999 exactly as today.
 
-### 2.6 `Source/DSP/Model.h` / `Model.cpp`
-* `ModelFrontend`: add protected `bool report_invalid = false, quick_reset = true;`. Add `SetKey` cases for `KEY_SETTING_REPORT_INVALID` and `KEY_SETTING_QUICK_RESET` (`Util::Parse::Switch`). Extend `Get()`, non-default values only.
-* In each `buildModel`, beside the existing `setOrigin` calls, add `DEC.setValidation(report_invalid, quick_reset)`:
-  * `ModelBase` (`Model.cpp:428`)
-  * `ModelStandard` (`:501`)
-  * `ModelDefault` (`:547`)
-  * `ModelChallenger` (`:643-647`, four decoder arrays)
-  * `ModelEngineV2`: inside the existing `getDecoder(i)` loop (`:455-459`). No change to `V2Engine` is needed.
+The reason is derived in the decoder rather than inside `validate()`. That keeps `validate()`'s signature and its three NMEA call sites unchanged.
 
-### 2.7 `Source/JSON/KeyDefs.h`
-* Add `X(KEY_SETTING_QUICK_RESET, …, "quick_reset", …)` and `X(KEY_SETTING_REPORT_INVALID, …, "report_invalid", …)`. They **must** sit between `KEY_SETTING_ABOUT` and `KEY_SETTING_ZONE`, because `lookupSettingKey()` iterates that range (`Keys.cpp:39`). Put them alphabetically near `PS_EMA` and `REMOVE_EMPTY`.
-* Update the `KEY_QUALITY` and `KEY_SETTING_EXCLUDE_ERRORS` descriptions.
-* Check that no persisted file stores numeric `Keys` values; the enum shifts. Upstream adds keys routinely, so this is expected to be fine, but verify the backup and `DatabaseOutput` column mapping.
+### 2.5 `Source/Marine/Message.cpp`: `getNMEAJSON()` (`:91`)
+* After the `ipv4` block (`:145-149`), add `if (tag.error) { ",\"error\":" N }`.
+* `:171`: change `if (getLength() > 0)` to `if (getLength() > 0 && !(tag.error & MESSAGE_ERROR_INVALID_SHORT))`.
 
-### 2.8 `Source/JSON/JSONAIS.cpp`: `ProcessMsg()`
-* Header block (`:1287`): change `if (msg.getLength() > 0)` to `if (msg.getLength() > 0 && (!invalid || msg.getLength() >= 38))`.
-* Before `switch (msg.type())`: `if (invalid && (tag.quality & MESSAGE_INVALID_MASK) != MESSAGE_INVALID_MMSI) return;`. Nothing after the switch needs to run; `Receive()` sends right after.
+### 2.6 `Source/Marine/Message.cpp`: `Filter`
+* `include()` (`:1015`): wrap the `own_interval`, `position_interval` and `unique_interval` blocks in `if (!msg.isInvalid())`.
+  * `own_interval`: a frame whose junk MMSI equals the own MMSI would otherwise suppress real own-vessel output.
+  * `position_interval`: a LENGTH-flagged type 1 with a real MMSI would otherwise suppress that ship's next genuine report. This matters because the check runs even with FILTER off.
+* After the `remove_empty` check (`:1056`): add `if (remove_invalid && msg.isInvalid()) return false;`.
+* `:1130` type aliasing: replace `(1U << (msg.type() & 31)) & allow` with `msg.type() < 32 ? ((1U << msg.type()) & allow) != 0 : allow == all`. This is identical for every frame reachable by default (type ≤ 28 or 0-bit type 0).
+* `SetOptionKey`: add `case KEY_SETTING_REMOVE_INVALID` next to `REMOVE_EMPTY` (`:930`). `Get()`: print it when on.
 
-### 2.9 `Source/Tracking/DB.cpp`: `DB::Receive()` (`:1536`)
-* First statement after `msg` is set: `if (tag.quality & MESSAGE_QUALITY_INVALID) return;`. This covers ships, paths, the binary store, places, visits, histories, counters, SSE and Prometheus.
+### 2.7 `Source/DSP/Model.h` / `Model.cpp`
+* `ModelFrontend` (`Model.h:132-145`): add `bool report_invalid = false, quick_reset = true;`.
+* `SetKey` (`Model.cpp:357`): add two `Util::Parse::Switch` cases. `Get()` (`:403`): append each one only when non-default.
+* Next to each `setOrigin` call, add `DEC.setValidation(report_invalid, quick_reset)`:
+  * `ModelBase` (`:428-429`)
+  * `ModelStandard` (`:458-459`)
+  * `ModelDefault` (`:505-506`)
+  * `ModelChallenger` (`:602-606`, four arrays)
 
-### 2.10 Other hard skips (one line each)
-* `DBMS/DatabaseOutput.cpp` `Receive()` (`:655`): skip flagged frames. This makes the `1 << msg.type()` at `:714` unreachable for type ≥ 31. Also change that line to `msg.type() < 32 ? 1u << msg.type() : 0` as belt and braces; it is outside the default path.
-* `IO/N2KStream.cpp` `N2KStreamer::Receive()` (`:773`): skip flagged frames. Otherwise below-minimum-length type 1/2/3/5/… frames would be encoded as PGNs from zero padding.
-* `IO/Network.h` `HubStreamer::sendFormatted()` (`:213`): skip flagged frames. The community feed (auto-enabled by `-X`) must never receive them. It sets `FILTER on` but no `EXCLUDE_ERRORS`, and a user config could override a filter-based exclusion, so a hard skip is safer.
+### 2.8 `Source/JSON/KeyDefs.h`
+* Add three X-lines: `KEY_SETTING_QUICK_RESET` ("quick_reset"), `KEY_SETTING_REPORT_INVALID` ("report_invalid") and `KEY_SETTING_REMOVE_INVALID` ("remove_invalid"). They **must** sit between `KEY_SETTING_ABOUT` (`:50`) and `KEY_SETTING_ZONE` (`:255`), because `lookupSettingKey()` iterates that range. Place them alphabetically next to `PS_EMA`/`REMOVE_EMPTY` (`:171-175`).
+* Also give `KEY_ERROR` (`:29`) a description string listing the values.
+* Before merging, check that no persisted file stores numeric `Keys` values; the enum shifts. PostgreSQL's `db_keys` mapping is by name at startup, but verify.
 
-### 2.11 `Source/Application/CommandLine.cpp`
-* Usage line `:120`: add `REPORT_INVALID [on/off] QUICK_RESET [on/off]` to the `-go` list.
+### 2.9 `Source/JSON/JSONAIS.cpp`: `ProcessMsg()`
+* `:1138`: same SHORT guard as §2.5.
+* Before `switch (msg.type())` (`:1150`): `if (tag.error & (MESSAGE_ERROR_INVALID_SHORT | MESSAGE_ERROR_INVALID_LENGTH)) return;`. Nothing after the switch needs to run.
+
+### 2.10 Hard skips (one line each, `if (msg.isInvalid()) return;`)
+* `Tracking/DB.cpp:1119` `DB::Receive()`, **before** `filter.include()`. This covers ships, histories, counters, SSE, Prometheus and viewer plugins.
+* `DBMS/PostgreSQL.cpp:478` `Receive()`, before `filter.include()`. This also makes the `1 << msg.type()` at `:524` unreachable for type ≥ 31.
+* `IO/N2KStream.cpp:777` `N2KStreamer::Receive()`. Otherwise LENGTH-flagged type 1/5/… frames would become PGNs built from zeros.
+
+### 2.11 Community feed and CLI
+* `Application/RunState.h:75-89` `createCommunityFeed()`: add `.SetKey(AIS::KEY_SETTING_REMOVE_INVALID, "on")`.
+* `Application/Main.cpp:147` usage line: add `REPORT_INVALID [on/off] QUICK_RESET [on/off]`. Also list `REMOVE_INVALID` with the output filter options.
 
 ### 2.12 Commit sequence
-1. Add the constants and reason bits in `validate()`, plus the test harness. No behaviour change; the harness proves it.
+1. Add the constants and the `Message::invalid` marker, plus the T1 harness running column D. No behaviour change.
 2. Add the decoder options, keys and model plumbing. Behaviour is gated.
-3. Add the consumer guards: Filter, JSONAIS, DB, DatabaseOutput, N2K, Hub.
+3. Add the consumer guards: Filter, `getNMEAJSON`, JSONAIS, DB, PostgreSQL, N2K, community feed.
 4. Update the usage text and key descriptions.
 
-Optional, not included: add a `, INVALID` marker to the human-readable `FULL` screen format (`IO/MsgOut.h:71-107`), which currently cannot show `quality`.
+Optional, not included: add an `INVALID` marker to the human-readable FULL screen format (`IO/Screen.cpp:97`). After the tail clear it prints `MSG: 0, MMSI: 0` for SHORT frames.
 
 ---
 
-## 3. Downstream consumer audit
+## 3. Downstream consumer audit (v0.70)
 
 Paths from the decoder:
 
-* **Message stream:** `Model::output` goes to message outputs (NMEA, NMEA_TAG, FULL, JSON_NMEA, BINARY_NMEA, COMMUNITY_HUB), `ScreenOutput`, `StreamCounter`, `ChannelActivity` and `JSONAIS`.
-* **JSON stream:** `JSONAIS` goes to JSON-format outputs, `DatabaseOutput`, `N2KStreamer`, `HTTPStreamer` and `DB`. `DB` then feeds `History ×4`, `Counter ×2`, `SSEStreamer` and `PrometheusCounter`.
+* **Message stream:** `Model::output` goes to message outputs (NMEA, NMEA_TAG, FULL, JSON_NMEA, BINARY_NMEA, COMMUNITY_HUB), `Screen` and `StreamCounter`, and to `JSONAIS`.
+* **JSON stream:** `JSONAIS` goes to JSON-format outputs, `PostgreSQL`, `N2KStreamer` and `DB` (web viewer). `DB` then feeds `History ×4`, `Counter ×2`, `SSEStreamer`, `PrometheusCounter` and plugins.
 
-| Consumer | Where | Verdict | Notes |
+| Consumer | Location | Verdict | Notes |
 |---|---|---|---|
-| `AIS::Filter::include()` (all outputs, DB) | `Message.cpp:1129` | **Needs a guard** | History blocks (own, position, unique) and type aliasing (§2.3). The error, quality and only_errors logic already fits. |
-| UDP / TCP client / TCP listener / MQTT / file outputs (`OutputMessage::Receive`) | `IO/MsgOut.h:177-207` | **Safe, passes** | Flag visible only in JSON_NMEA, JSON_*, BINARY_NMEA. Per-output opt-out: `FILTER on EXCLUDE_ERRORS invalid`. |
-| `HTTPStreamer` (AISCATCHER / APRS / LIST / AIRFRAMES / NMEA upload) | `IO/Network.cpp:77` | **Safe, but document** | User-configured. Uploads to third parties (APRS, Airframes) should set `EXCLUDE_ERRORS invalid` (Q5). |
-| `HubStreamer` (community feed, `-X`) | `IO/Network.h:213` | **Must skip** | Hard skip (§2.10). |
-| `ScreenOutput` (`-o N`) | `IO/Screen.h` | **Safe** | FULL format prints type and MMSI (zeros after tail clear) with no flag; optional marker. JSON formats carry `quality`. |
-| `JSONAIS` (JSON decoder) | `JSON/JSONAIS.cpp:1238` | **Needs a guard** | §2.8. `getUint()` is bounds-checked to `MAX_AIS_LENGTH`, so there is no out-of-bounds read even for crafted frames. |
-| `N2KStreamer` | `IO/N2KStream.cpp:769` | **Must skip** | §2.10. |
-| `DatabaseOutput` (PostgreSQL / SQLite / CSV) | `DBMS/DatabaseOutput.cpp:650` | **Must skip** (default; see Q3) | Writes a message row and a per-MMSI state row; `1 << type` is UB for type ≥ 31; `accumulateStats` inserts the junk MMSI into hourly vessel counts. |
-| `Tracking/DB` (ship table, web viewer) | `Tracking/DB.cpp:1536` | **Must skip** | Existing `type` 1..28 guard misses LENGTH, SHORT and MMSI reasons with a valid type. MMSI-0 or partial type 1/5 frames would create or move ships. |
-| `History` / `Counter` / `MessageStatistics` | `Tracking/History.h:66`, `Statistics.h:88,296` | **Safe** (behind DB) | Own 1..28 guard, too. |
-| `SSEStreamer` (live NMEA/signal feed) | `Web/WebViewer.cpp:36` | **Safe** (behind DB) | — |
-| `PrometheusCounter` | `Web/Prometheus.cpp:56` | **Safe** (behind DB) | Own 1..28 guard, too. |
-| `StreamCounter` (`-v` stats) | `IO/StreamCounter.h:49` | **Safe** | The count includes flagged frames in opt-in mode. Document it. |
-| `ChannelActivity` (control UI) | `Control/ControlCore.h:42` | **Safe** | Counts RF activity per channel; including flagged frames is arguably correct. |
-| NMEA / JSON / binary **input** of another AIS-catcher | `Marine/NMEA.cpp:119,462,575,827` | **Safe** | A downstream instance clears the INVALID bits in `validate()` and then drops the frame, as today. |
-| `buildNMEA()` AIVDM/AIVDO | `Message.cpp` | **Safe** | A flagged frame whose MMSI equals the own MMSI is rendered `!AIVDO`. Cosmetic. |
-| `V2::Engine` slot-phase learning | `V2Engine.cpp:371` | **Unchanged** | Already fed by CRC-valid invalid frames upstream (`processData` returns true). |
+| `AIS::Filter::include()` | `Marine/Message.cpp:1015` | **Needs a guard** | History blocks and type aliasing (§2.6). No TAG, hence the `Message::invalid` marker. |
+| UDP / TCP client / TCP listener / MQTT / HTTP outputs | `IO/Network.cpp` (`:77,391,409,546,565,722,734,808,823`) | **Safe, passes** | Flag visible in JSON_NMEA and JSON_* only. `REMOVE_INVALID on` excludes it per output. HTTP uploads to third parties (APRS etc.) should set it (Q5). |
+| Community feed (`-X`, TCPClientStreamer, COMMUNITY_HUB) | `Application/RunState.h:75` | **Must skip** | `REMOVE_INVALID on` (§2.11). |
+| File output | `IO/File.h:66-126` | **Safe, passes** | — |
+| Screen (`-o N`) | `IO/Screen.cpp:85,142` | **Safe** | FULL format shows type/MMSI without a flag (zeros for SHORT after the tail clear); JSON formats show `error`. |
+| `getNMEAJSON()` (JSON_NMEA) | `Marine/Message.cpp:91` | **Needs a guard** | §2.5 (error key, SHORT guard). |
+| `getBinaryNMEA()` / NMEA / NMEA_TAG | `Marine/Message.cpp` | **Safe, but flag lost** | Do not use these for Zeek. |
+| `JSONAIS` | `JSON/JSONAIS.cpp:1090` | **Needs a guard** | §2.9. `getUint()` is bounds-checked, so crafted frames cannot read out of bounds. |
+| `N2KStreamer` | `IO/N2KStream.cpp:773` | **Must skip** | §2.10. |
+| `PostgreSQL` | `DBMS/PostgreSQL.cpp:478` | **Must skip** (default, Q3) | Message row, `ais_vessel` upsert keyed by MMSI, `1 << type` UB for type ≥ 31. |
+| `Tracking/DB` (ship table) | `Tracking/DB.cpp:1119` | **Must skip** | The existing guard (type 1..28, MMSI ≠ 0) lets LENGTH-flagged and MMSI > 1e9 frames through. |
+| `History` / `Counter` / `MessageStatistics` | `Tracking/History.h`, `Tracking/Statistics.h:81` | **Safe** (behind DB) | Own 1..28 guard too. |
+| `SSEStreamer`, `PrometheusCounter`, viewer plugins | `Application/WebViewer.cpp:934,950`, `Application/Prometheus.cpp:59` | **Safe** (behind DB) | — |
+| `StreamCounter` (`-v` stats) | `IO/StreamCounter.h:27` | **Safe** | The count includes flagged frames in opt-in mode. Document it. |
+| Downstream AIS-catcher reading our output | `Marine/NMEA.cpp` | **Safe, one caveat** | SHORT, TYPE and LENGTH frames fail `validate()` downstream and are dropped. **MMSI-flagged frames pass downstream validation** and would enter that instance's ship DB, because NMEA loses the flag. Don't chain the flagged feed into another AIS-catcher, or set `REMOVE_INVALID on` on that output. |
 
 ---
 
@@ -286,9 +317,11 @@ Paths from the decoder:
 `processData()` is reachable only from the RF path. Test on three levels.
 
 ### T1: Unit harness driving `AIS::Decoder` directly (primary)
-New `scripts/test-invalid-frames.cpp`, following the precedent of `scripts/test-binary-badges.cpp` (standalone, no test framework, `assert`). A generator builds the payload, computes the FCS exactly like `Decoder::CRC16`, bit-stuffs, adds training bits and flags, NRZI-encodes to ±1 floats, and calls `Decoder::Receive()`. A `StreamIn<AIS::Message>` sink records `type`, `mmsi`, `length`, `tag.quality`, the NMEA text, and the JSONAIS JSON.
+New `scripts/test-invalid-frames.cpp`, standalone with `assert`. HEAD has this kind of script (`scripts/test-binary-badges.cpp`); v0.70 does not, so this adds the pattern.
 
-**This generator already works against the unmodified tree** (appendix). Build line, verified:
+A generator builds the payload, computes the FCS exactly like `Decoder::CRC16`, bit-stuffs, adds training bits and flags, NRZI-encodes to ±1 floats, and calls `Decoder::Receive()`. A `StreamIn<AIS::Message>` sink records `type`, `mmsi`, `length`, `tag.error`, `getNMEAJSON()` and JSONAIS output.
+
+**It already compiles and runs against v0.70** (appendix). Build line:
 
 ```
 c++ -std=c++11 $(find Source -type d | sed 's/^/-I/') scripts/test-invalid-frames.cpp \
@@ -297,67 +330,63 @@ c++ -std=c++11 $(find Source -type d | sed 's/^/-I/') scripts/test-invalid-frame
     Source/Library/Logger.cpp -lpthread -o /tmp/test-invalid-frames
 ```
 
-Adding the JSONAIS check needs `JSON/JSONAIS.cpp` and `JSON/JSON.cpp` as well.
+The JSONAIS check also needs `JSON/JSONAIS.cpp` and `JSON/JSON.cpp`.
 
-Cases. Columns: **D** = default, **R** = `report_invalid on, quick_reset off`, **R+Q** = `report_invalid on, quick_reset on`. The D column was measured on the current code.
+Columns: **D** = defaults, **R** = `report_invalid on, quick_reset off`, **R+Q** = `report_invalid on, quick_reset on`. The D column was measured on v0.70.
 
 | # | Frame | D (measured) | R expected | R+Q expected |
 |---|---|---|---|---|
-| 1 | type 1, MMSI 244123456, 168 bits | sent, q=0 | sent, q=0, **NMEA byte-identical to D** | same |
-| 2 | type 0, 72 bits | dropped (QuickReset) | q=12288 (TYPE), JSON has type/repeat/mmsi, no body | dropped |
-| 3 | types 29, 45, 63, 72 bits | dropped | q=12288 | dropped |
-| 4 | type 0, 7 bits (below the QuickReset threshold) | dropped (`validate`) | q=4096 (SHORT) | q=4096 |
-| 5 | type 1, 100 bits (< 149) | dropped | q=20480 (LENGTH), JSON without body | q=20480 |
-| 6 | 20-bit frame | dropped | q=4096, JSON has **no** type/mmsi, NMEA payload 4 chars | q=4096 |
-| 7 | 37 and 38 bits (boundary) | dropped | 4096 / 20480 | same |
-| 8 | 0-bit frame | sent, q=0, type 0, **mmsi 2064384** | sent, q=0, **mmsi 0** | same as R |
-| 9 | type 1, MMSI 0, 168 bits | dropped | q=28672 (MMSI), body decoded | q=28672 |
-| 10 | type 1, MMSI 1073741823 | dropped | q=28672 | dropped |
-| 11 | type 1, 169 bits | sent, q=2048 | q=2048 | q=2048 |
-| 12 | type 1, 170 bits | dropped | q=2048 (OVERSIZED, not INVALID) | dropped |
-| 13 | type 10, 80 bits (validate has no OVERSIZED for type 10) | dropped | q=2048 via `overrun` | dropped |
-| 14 | `quick_reset off`, `report_invalid off`: cases 10 and 13 | — | #10 **dropped** (not emitted as valid), #13 q=2048 | — |
-| 15 | Tag reuse: invalid frame, then a valid frame on the same `TAG` | — | second frame q=0 (no bit leakage) | — |
-| 16 | Payload with long runs of ones (stuffing), 1064-bit type 26 | sent | identical to D | identical |
+| 1 | type 1, MMSI 244123456, 168 bits | sent, error 0 | **byte-identical to D** | same |
+| 2 | type 0, 72 bits | dropped | error 20, `type:0` + mmsi in JSON, no body | dropped (canStop) |
+| 3 | types 29, 45, 63, 72 bits | dropped | error 20 | dropped |
+| 4 | type 0, 7 bits (below the canStop threshold) | dropped (validate) | error 12, no type/mmsi keys | error 12 |
+| 5 | type 1, 100 bits (< 149) | dropped | error 36, no JSONAIS body | error 36 |
+| 6 | 20-bit frame, after a valid frame | dropped | error 12; no type/mmsi; NMEA payload 4 chars | error 12 |
+| 7 | 37 / 38 bits (boundary) | dropped | 12 / 36 (or 20) | same |
+| 8 | 0-bit frame after type 1, and after type 5 | sent, error 0, **MMSI 2066240 / 2070824 (stale)**; JSON has no mmsi | sent, error 0, **MMSI 0 in both cases** | same as R |
+| 9 | type 1, MMSI 0 | **sent, error 0** (v0.70 behaviour) | unchanged (not flagged, Q6) | unchanged |
+| 10 | type 1, MMSI 1073741823 | dropped | error 68, body decoded | dropped |
+| 11 | type 1, 169 bits | sent, error 0 | error 0 (below the canStop limit) | error 0 |
+| 12 | type 1, 170 bits | dropped | error 128 (OVERSIZED, not INVALID) | dropped |
+| 13 | type 10, 80 bits | dropped | error 128 | dropped |
+| 14 | `quick_reset off` only (`report_invalid off`): #10 and #13 | — | #10 **dropped** (not emitted as valid); #13 error 128 | — |
+| 15 | Invalid frame, then a valid frame on the same `TAG` and decoder | — | second frame error 0, `isInvalid()` false | — |
+| 16 | 1001-bit type 26 / 8 with long runs of ones (stuffing) | sent | identical to D | identical |
 
-Also run the harness under `-fsanitize=undefined,address` and with `-m32` (if multilib is available). These catch shift-width UB and 32-bit truncation.
+Also run the harness under `-fsanitize=undefined,address` and with `-m32` if multilib is available.
 
-### T2: Filter and consumer units (extend T1)
-Feed the flagged messages through:
+### T2: Consumers (extend T1)
+* **Filter:**
+  * `ALLOW_TYPE 1` must reject type 33;
+  * `POSITION_INTERVAL 60`: a LENGTH-flagged type 1 with a real MMSI must not suppress the next valid report;
+  * `FILTER on REMOVE_INVALID on` must drop flagged frames.
+* **DB:** the ship count must be unchanged after flagged frames.
+* **JSONAIS:** SHORT/LENGTH frames have no body keys.
 
-* `AIS::Filter` with `ALLOW_TYPE 1`: type 33 must not pass.
-* `POSITION_INTERVAL 60`: a flagged type 1 with a real MMSI must not suppress the next valid report.
-* `EXCLUDE_ERRORS invalid` and `ONLY_ERRORS`.
-* A `Tracking::DB` instance: the ship count must stay unchanged after flagged frames.
+### T3: Default-output regression (the "identical to v0.70" gate)
+Build the **baseline** (tag) and the **patched** binary. Run each on the same inputs with **no new options**:
 
-### T3: Default-output regression (the "identical to upstream" gate)
-Build **baseline** (this HEAD) and **patched** binaries. Run each on the same inputs with no new options:
-
-1. A real IQ recording (ideally a busy one), e.g. `-r cu8 rec.raw -s 1536K -o 5` and `-o 3`, plus `-go` with each engine: `-m 2`, `-m 4`, v2.
+1. A real IQ recording (busy channel), e.g. `-r cu8 rec.raw -s 1536K`, with `-o 3` (JSON_NMEA), `-o 5` (JSON_FULL) and `-n`. Repeat for `-m 2` (default), `-m 4` and `-m 0`.
 2. The synthetic IQ file from T4.
-3. NMEA text, JSON and BINARY_NMEA input files (`-r txt …`), because `validate()` changed.
+3. NMEA text input (`-r txt file.nmea -o 5`), as a sanity check. The NMEA path is untouched, but `Filter` changed.
 
-Strip `rxtime` and `rxuxtime` (for example `jq -c 'del(.rxtime,.rxuxtime)'`) and `diff`. **The acceptance criterion is zero differences.** Also diff the `-v` startup log lines.
+Strip `rxtime`/`rxuxtime` and `diff`. **Zero differences required.** Also diff the `-v` startup lines.
 
 ### T4: Synthetic IQ end-to-end (`-r`)
-A Python script (numpy):
+A numpy script:
 
-* Encodes the T1 bit streams as GMSK (BT 0.4, 9600 Bd) on channel A/B offsets.
-* Sets the SNR to about 20 dB.
-* Writes CU8 or CF32 at a supported rate (e.g. 288 kS/s).
+* GMSK-modulates the T1 bit streams (BT 0.4, 9600 Bd) on the channel A/B offsets at about 20 dB SNR;
+* writes CF32 or CU8 at a supported rate (e.g. 288 kS/s).
 
-Run `AIS-catcher -r cf32 syn.raw -s 288K -go REPORT_INVALID on QUICK_RESET off -o 3`. Check that each crafted frame appears once, with the expected `quality`. This exercises the full DSP chain, the sibling-decoder reset (no duplicates), JSONAIS and the outputs. The same file with only Gaussian noise serves as the **junk-rate test**: run the equivalent of hours of signal faster than real time and count INVALID lines per hour of signal time, by reason, for `quick_reset` on and off.
+Run `AIS-catcher -r cf32 syn.raw -s 288K -go REPORT_INVALID on QUICK_RESET off -o 3`. Each crafted frame must appear **once** with the expected `error`. This exercises the DSP chain, the sibling-decoder reset (no duplicates) and the serialisers.
+
+The same generator with **noise only** is the **junk-rate test**: replay hours of signal time faster than real time and count flagged lines per hour, by reason, with `quick_reset` on and off.
 
 ### T5: Sensitivity A/B for `quick_reset off`
-On a real recording, run two models in one process (or two runs): upstream settings versus `QUICK_RESET off`. Compare:
-
-* the count of valid (`!(q & 4096)`) messages;
-* the count of unique MMSIs.
-
-The acceptance threshold is to be agreed (Q7); I suggest a loss of at most 0.5 %.
+On a real recording, run two models in one process (`-m 2 -m 2 -go QUICK_RESET off`; outputs are separated by group) or two runs. Compare valid (`!(error & 4)`) message counts and unique MMSIs. The acceptance threshold is to be agreed (Q7); I suggest a loss of at most 0.5 %.
 
 ### T6: Builds
-Run the existing CI matrix: Debian/Ubuntu/Fedora x64, the armv6 (Raspberry Pi OS 32-bit) job, and Windows MSVC. Also compile the T1 harness on MSVC if feasible.
+Linux x64, Raspberry Pi OS 32-bit (armhf), Windows MSVC. Also compile the T1 harness on MSVC if feasible.
 
 ---
 
@@ -365,47 +394,66 @@ Run the existing CI matrix: Debian/Ubuntu/Fedora x64, the armv6 (Raspberry Pi OS
 
 * **Junk from noise.** Order-of-magnitude estimate, to be measured in T4:
   * In noise, each decoder sees a false training-plus-start-flag roughly every 10³ bits, so about 5 candidate frames per second per decoder.
-  * Candidates end at the first run of six ones, about 126 bits on average.
-  * Decoders per model: about 10 (v1 base), 20 (v1 high), 12 (v2). That gives about 50-100 candidates per second per receiver, and at 1 in 65536 about **one CRC pass every 10-20 minutes**.
-  * Upstream drops nearly all of these (QuickReset plus `validate`). With the option on, they are emitted.
-  * About half end before 38 payload bits, so SHORT will dominate. Expect **a few flagged junk frames per hour per receiver**, usually at low `signalpower`.
-  * Zeek should weight SHORT and isolated low-level INVALID frames accordingly, and should correlate: repeated TYPE/LENGTH/MMSI frames at good signal level are the interesting ones.
-* **Sensitivity with `quick_reset off`.** CPU cost is negligible: one branch per bit, plus a CRC of about 100 iterations per candidate. The real cost is that a decoder stays busy on a noise candidate for about 126 bits instead of being aborted at 30 or 62 bits. A real preamble arriving during that window is lost **for that decoder**. The parallel decoders (5 phases per channel) mitigate this. Measure with T5.
-* **Spurious sibling resets.** Every CRC pass, invalid or not, resets the sibling decoders (`processData` returns true). A junk CRC pass in the middle of a real frame on another decoder can lose that frame. This already happens upstream; with QuickReset off it happens slightly more often (a few times per hour). Keep `return true`: returning false would make the siblings decode the same real invalid transmission again, producing duplicates.
-* **Crafted frames.** An adversary can transmit invalid frames on purpose; that is the point. AIS-catcher-side safety:
+  * Each candidate ends at the first run of six ones, about 126 bits on average.
+  * v1 base has about 10 decoders per model and v1 high about 20. That gives about 50-100 candidates per second, and at 1 in 65536 about **one CRC pass every 10-20 minutes per receiver**.
+  * v0.70 drops nearly all of these (canStop plus `validate`). With the option on, they are emitted.
+  * About half end before 38 payload bits, so SHORT (error 12) will dominate. Expect **a few flagged junk frames per hour**, usually at low `signalpower`.
+  * Zeek should down-weight isolated SHORT or low-level frames, and alert on repeated TYPE/LENGTH/MMSI frames at a good level.
+* **Sensitivity with `quick_reset off`.** CPU cost is negligible: one branch per bit, plus a CRC of about 100 iterations per candidate, plus a memset when `report_invalid` is on. The real cost is that a decoder stays on a noise candidate for about 126 bits instead of 30 or 62. A real preamble in that window is lost **for that decoder**. The parallel phase decoders mitigate this. Measure with T5.
+* **Spurious sibling resets.** Every CRC pass resets the sibling decoders (`processData` returns true). That already happens at v0.70; it becomes a little more frequent. Keep `return true`: returning false would let siblings decode the same invalid transmission again, producing duplicates.
+* **Crafted frames.** Adversarial invalid frames are the point of this feature. AIS-catcher-side safety:
   * buffers are bounded (`MaxBits`, bounds-checked `getUint`/`setBit`);
   * flagged frames cannot touch ship state (DB skip);
-  * they cannot suppress real reports (Filter history guard);
+  * they cannot suppress real reports (Filter guard);
   * they cannot reach the community feed.
 * **32-bit builds** (Raspberry Pi OS armhf, Windows where `long` is 32-bit):
-  * the new constants are `uint16_t` literals ≤ `3 << 13`;
-  * no new `long` or `time_t` arithmetic;
-  * shifts by `type` are bounded (< 32) by the Filter fix and the `DatabaseOutput` guard;
-  * `mmsi()` is 30 bits in `unsigned`.
-  * T1 under `-m32`/UBSan plus the armv6 CI job cover this.
-* **Rebase.** Upstream may later claim bits 12-15 or reorganise `Filter`/`validate()`. The changes are small and grouped into four commits. The key X-lines sit in the alphabetical block, so conflicts will be local.
-* **Default drift.** Guarded by T3 (zero-diff gate) and T1 column D, whose values were measured on the current code.
+  * the new constants are small `int`s;
+  * `tag.error` is `uint32_t`;
+  * shifts by `type` are bounded (< 32) by the Filter fix and the PostgreSQL skip;
+  * no new `long` or `time_t` arithmetic.
+  * **Pre-existing, not introduced here:** `Decoder::start_idx`/`end_idx` and `Message::start_idx` are `long`. On 32-bit targets `ssc`/`sl` wrap after 2³¹ samples (about 2 hours at 288 kS/s). This only affects JSON_NMEA `ssc`/`sl` with `INCLUDE_SAMPLE_START`. Upstream later changed them to `long long`.
+* **Rebase and upgrade.** HEAD reworked this area (§8), so the v0.70 patch will **not** rebase mechanically. The plan keeps it small and in four commits so it can be re-applied by hand. Re-implement it against HEAD's `quality` field rather than rebasing.
+* **Default drift.** Guarded by T3 (zero-diff gate) and T1 column D, whose values were measured on v0.70.
 
 ---
 
 ## 6. Open questions
 
-1. **Baseline.** Your fact list matches an older tree (`TAG::error`, `canStop()`), not this checkout (`TAG::quality`, `cannotBeValid()`). Which tree is deployed? This plan targets the checkout. On the older tree the bit would go into `error`, and `getNMEAJSON()` would need the change R4 describes.
-2. **Bit layout.** Is bit 12 plus a 2-bit reason code (bit 15 left for the CRC-failure feature) acceptable, or do you prefer independent bits?
-3. **Database backends.** Skip flagged frames (recommended), or store them for forensics? Storing them needs the `type_bit` guard and a check that `msg_type` accepts 0-63, and must not update the per-MMSI state table.
-4. **Web viewer.** Should it show an "invalid frames" counter? Proposed: no; Zeek owns this. If yes, add one bucket to `MessageStatistics` and bump its `_VERSION`, which invalidates saved backups.
-5. **Third-party uploads.** Hub gets a hard skip. For HTTP uploads (APRS, Airframes), rely on `EXCLUDE_ERRORS invalid`, or hard-skip them too?
-6. **Oversize overrun.** Reuse `OVERSIZED` (proposed), or add a separate flag? Reusing it keeps bit 15 free.
+1. **Upgrade path.** Will you stay on v0.70 or move to a newer upstream soon? If you move, implement directly on HEAD (§8); the design carries over, but the bit and field names change.
+2. **Error bits.** Are the independent bits 4/8/16/32/64 plus 128 for OVERSIZED OK? Any preference to align values with the later HEAD `quality` bits (4096…)?
+3. **PostgreSQL.** Skip flagged frames (recommended), or store them for forensics? Storing them needs a `type_bit` guard and a check that the `msg_type` column accepts 0-63, and must not upsert `ais_vessel`.
+4. **Web viewer.** Should it show an "invalid frames" counter? Proposed: no, Zeek owns this. If yes, add a bucket to `MessageStatistics` and bump its save-format version.
+5. **Third-party HTTP uploads** (APRS, …). Rely on the user setting `REMOVE_INVALID on`, or force it?
+6. **MMSI 0.** v0.70 sends these unflagged. Keep that (proposed, preserves default output), or flag them as INVALID_MMSI in opt-in mode only?
 7. **Sensitivity acceptance** for `quick_reset off` in T5: what loss is acceptable?
-8. **Zeek input format.** JSON_NMEA (proposed) or JSON_FULL? Plain NMEA cannot carry the flag.
-9. **Coupling.** Should `report_invalid on` imply `quick_reset off`? Proposed: no, keep them independent and just document the pair.
-10. **Upstreaming.** Is this meant to go upstream eventually? If so, agree the bit allocation with the maintainer first.
+8. **Zeek input format.** JSON_NMEA (proposed, compact, has `nmea` + `error`) or JSON_FULL?
+9. **Coupling.** Should `report_invalid on` imply `quick_reset off`? Proposed: no, keep them independent and document the pair.
+10. **OVERSIZED.** Should overrun frames stay out of the ship DB too (treat as INVALID), or keep flowing like v0.70's standard+1 oversized frames (proposed)?
 
 ---
 
-## Appendix: verified frame generator and measured baseline
+## 7. Measured baseline (v0.70 probe)
 
-The core of the probe that produced the "D" column. It was run against the unmodified tree; `QuickReset` was flipped only in a scratch copy of `AIS.h`.
+The probe drove `AIS::Decoder` (v0.70 sources from `git archive v0.70`). `QuickReset` was flipped only in a scratch copy of `AIS.h`.
+
+```
+                              QuickReset on (v0.70)                          QuickReset off (scratch copy)
+valid type 1          P=168   SENT mmsi=244123456 err=0                      same
+0-bit after type 1    P=  0   SENT mmsi=2066240 (stale)  JSON: no mmsi/type  same
+valid type 5          P=424   SENT                                           same
+0-bit after type 5    P=  0   SENT mmsi=2070824 (stale)                      same
+type 1 oversize +1    P=169   SENT err=0                                     SENT err=0
+type 1 oversize +2    P=170   dropped                                        SENT err=0   <- unflagged: overrun latch
+type 1 below min      P=100   dropped                                        dropped (validate)
+type 0 / 45 / 63      P= 72   dropped                                        dropped (validate)
+type 0                P=  7   dropped                                        dropped (validate)
+mmsi 0 type 1         P=168   SENT mmsi=0 err=0                              same
+mmsi 1073741823       P=168   dropped                                        SENT err=0   <- unflagged: MMSI check
+20-bit frame          P= 20   dropped                                        dropped (validate)
+type 10 oversize      P= 80   dropped                                        SENT err=0   <- unflagged: overrun latch
+```
+
+Frame generator (verified):
 
 ```cpp
 // payload bits in decoder storage order: bit k = byte[k>>3] bit (k&7);
@@ -432,21 +480,16 @@ static std::vector<float> frame(const std::vector<uint8_t> &bytes, int P) {
 }
 ```
 
-Measured output:
+---
 
-```
-                              QuickReset on (upstream)            QuickReset off (scratch copy)
-valid type 1          P=168   SENT q=0                            SENT q=0
-type 1 oversize +1    P=169   SENT q=2048                         SENT q=2048
-type 1 oversize +2    P=170   dropped                             SENT q=2048
-type 1 undersized     P=160   SENT q=1024                         SENT q=1024
-type 1 below min      P=100   dropped                             dropped (validate)
-type 0                P= 72   dropped                             dropped (validate)
-type 45               P= 72   dropped                             dropped (validate)
-type 0                P=  7   dropped                             dropped (validate)
-mmsi 0 type 1         P=168   dropped                             dropped (validate)
-mmsi 1073741823       P=168   dropped                             SENT q=0   <-- unflagged, fixed by §2.5
-20-bit frame          P= 20   dropped                             dropped (validate)
-0-bit frame           P=  0   SENT q=0 type=0 mmsi=2064384        same
-type 10 oversize      P= 80   dropped                             SENT q=0   <-- unflagged, fixed by overrun latch
-```
+## 8. Porting notes: v0.70 → master HEAD (`b6b4ae2`)
+
+HEAD changed this area. If the feature is ported to HEAD, the design stays but the mechanics differ:
+
+* **Error carrier.** `TAG::error` is gone. It was replaced by `uint16_t TAG::quality` with `CHECKSUM` = 512, `UNDERSIZED` = 1024 and `OVERSIZED` = 2048; bits 12-15 are free. Use bit 12 = INVALID plus a 2-bit reason in bits 13-14, and leave bit 15 for the CRC-failure feature. Reuse the existing `OVERSIZED` for the overrun latch.
+* **Serialisers.** `getNMEAJSON()` and BINARY_NMEA already emit `quality` when non-zero, so R4 is done on HEAD.
+* **Validation.** `validate(TAG&)` also rejects `len < 38` and **MMSI 0**, which adds an MMSI reason, and it sets UNDERSIZED/OVERSIZED. The reasons can be set inside `validate()`; its return value must not change.
+* **Stale bits.** The decoder already calls `msg.clear()` per frame (`AIS.h:131`). Only the FCS-tail clear is still needed.
+* **Filter.** `Filter::include(msg, tag)` takes the TAG and has `EXCLUDE_ERRORS`/`ONLY_ERRORS`/`IncludedWithError`. Add `invalid` to that vocabulary instead of `REMOVE_INVALID`. The `Message::invalid` marker is unnecessary.
+* **Decoder layout.** The decoder kernel moved to `Run()` in `AIS.h`, and `canStop()` was renamed `cannotBeValid()`. There is a V2 engine (`ModelEngineV2`, 6 decoders per channel) to plumb as well.
+* **Consumers.** The unguarded shift moved to `DBMS/DatabaseOutput.cpp:714` (shared by PostgreSQL, SQLite and CSV). The community feed is a dedicated `HubStreamer`. The ship DB is `Tracking/DB.cpp:1536`.
