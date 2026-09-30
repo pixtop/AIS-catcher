@@ -383,6 +383,12 @@ namespace AIS
 		case AIS::KEY_SETTING_DROOP:
 			droop_compensation = Util::Parse::Switch(arg);
 			break;
+		case AIS::KEY_SETTING_REPORT_INVALID:
+			report_invalid = Util::Parse::Switch(arg);
+			break;
+		case AIS::KEY_SETTING_QUICK_RESET:
+			quick_reset = Util::Parse::Switch(arg);
+			break;
 		case AIS::KEY_SETTING_STATION_ID:
 			station = Util::Parse::Integer(arg);
 			break;
@@ -405,14 +411,19 @@ namespace AIS
 
 		std::string str;
 
-		if (SOXR_DS)
-			return "soxr ON " + Model::Get();
-		else if (SAMPLERATE_DS)
-			return "src ON " + Model::Get();
-		else if (MA_DS)
-			return "MA ON " + Model::Get();
+		if (report_invalid)
+			str += "report_invalid ON ";
+		if (!quick_reset)
+			str += "quick_reset OFF ";
 
-		return "droop " + Util::Convert::toString(droop_compensation) + " fp_ds " + Util::Convert::toString(fixedpointDS) + " dsk " + Util::Convert::toString(allowDSK) + " " + Model::Get();
+		if (SOXR_DS)
+			return "soxr ON " + str + Model::Get();
+		else if (SAMPLERATE_DS)
+			return "src ON " + str + Model::Get();
+		else if (MA_DS)
+			return "MA ON " + str + Model::Get();
+
+		return "droop " + Util::Convert::toString(droop_compensation) + " fp_ds " + Util::Convert::toString(fixedpointDS) + " dsk " + Util::Convert::toString(allowDSK) + " " + str + Model::Get();
 	}
 
 	void ModelBase::buildModel(char CH1, char CH2, int sample_rate, bool timerOn, Device::Device *dev)
@@ -426,7 +437,9 @@ namespace AIS
 		FR_b.setTaps(Filters::Receiver);
 
 		DEC_a.setOrigin(CH1, station, own_mmsi);
+		DEC_a.setValidation(report_invalid, quick_reset);
 		DEC_b.setOrigin(CH2, station, own_mmsi);
+		DEC_b.setValidation(report_invalid, quick_reset);
 
 		*C_a >> FM_a >> FR_a >> sampler_a >> DEC_a >> output;
 		*C_b >> FM_b >> FR_b >> sampler_b >> DEC_b >> output;
@@ -456,7 +469,9 @@ namespace AIS
 		for (int i = 0; i < N_SAMPLES_PER_SYMBOL; i++)
 		{
 			DEC_a[i].setOrigin(CH1, station, own_mmsi);
+			DEC_a[i].setValidation(report_invalid, quick_reset);
 			DEC_b[i].setOrigin(CH2, station, own_mmsi);
+			DEC_b[i].setValidation(report_invalid, quick_reset);
 
 			S_a.out[i] >> DEC_a[i] >> output;
 			S_b.out[i] >> DEC_b[i] >> output;
@@ -503,7 +518,9 @@ namespace AIS
 		for (int i = 0; i < N_SAMPLES_PER_SYMBOL; i++)
 		{
 			DEC_a[i].setOrigin(CH1, station, own_mmsi);
+			DEC_a[i].setValidation(report_invalid, quick_reset);
 			DEC_b[i].setOrigin(CH2, station, own_mmsi);
+			DEC_b[i].setValidation(report_invalid, quick_reset);
 
 			if (!PS_EMA)
 			{
@@ -600,10 +617,14 @@ namespace AIS
 		for (int i = 0; i < N_SAMPLES_PER_SYMBOL; i++)
 		{
 			DEC_a[i].setOrigin(CH1, station, own_mmsi);
+			DEC_a[i].setValidation(report_invalid, quick_reset);
 			DEC_af[i].setOrigin(CH1, station, own_mmsi);
+			DEC_af[i].setValidation(report_invalid, quick_reset);
 
 			DEC_b[i].setOrigin(CH2, station, own_mmsi);
+			DEC_b[i].setValidation(report_invalid, quick_reset);
 			DEC_bf[i].setOrigin(CH2, station, own_mmsi);
+			DEC_bf[i].setValidation(report_invalid, quick_reset);
 
 			CD_EMA_a[i].setParams(nDelay);
 			CD_EMA_b[i].setParams(nDelay);

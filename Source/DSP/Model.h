@@ -135,6 +135,8 @@ namespace AIS
 		bool SAMPLERATE_DS = false;
 		bool MA_DS = false;
 		bool allowDSK = false;
+		bool report_invalid = false;
+		bool quick_reset = true;
 
 		Connection<CFLOAT32> *C_a = nullptr, *C_b = nullptr;
 		DSP::Rotate ROT;

@@ -82,8 +82,40 @@ namespace AIS
 			msg.setStartIdx(start_idx);
 			msg.setEndIdx(end_idx);
 
-			if (msg.validate())
+			// FCS and closing flag bits must not be read as type or MMSI
+			if (ReportInvalid)
+				for (int i = nBits; i < len + 7; i++)
+					msg.setBit(i, false);
+
+			tag.error &= ~(uint32_t)MESSAGE_ERROR_DECODER;
+
+			bool valid = msg.validate();
+			int reason = 0;
+
+			if (!valid)
 			{
+				if (nBits < 38)
+					reason = MESSAGE_ERROR_INVALID_SHORT;
+				else if (msg.type() < 1 || msg.type() > 28)
+					reason = MESSAGE_ERROR_INVALID_TYPE;
+				else
+					reason = MESSAGE_ERROR_INVALID_LENGTH;
+			}
+			else if (nBits && msg.mmsi() > 999999999)
+			{
+				reason = MESSAGE_ERROR_INVALID_MMSI;
+				valid = false;
+			}
+			else if (overrun)
+				tag.error |= MESSAGE_ERROR_OVERSIZED;
+
+			msg.setInvalid(!valid);
+
+			if (valid || ReportInvalid)
+			{
+				if (!valid)
+					tag.error |= MESSAGE_ERROR_INVALID | reason;
+
 				msg.buildNMEA(tag);
 				Send(&msg, 1, tag);
 			}
@@ -178,6 +210,9 @@ namespace AIS
 					{
 						NextState(State::DATAFCS, 0); // 0111111*0....
 						level = 0.0f;
+						overrun = false;
+						if (ReportInvalid)
+							msg.clear();
 					}
 					else
 						NextState(State::TRAINING, 0);
@@ -219,8 +254,15 @@ namespace AIS
 					one_seq_count = 0;
 				}
 
-				if (position == MaxBits || (QuickReset && canStop(position)))
+				if (position == MaxBits)
 					NextState(State::TRAINING, 0);
+				else if (canStop(position))
+				{
+					if (QuickReset)
+						NextState(State::TRAINING, 0);
+					else
+						overrun = true;
+				}
 				break;
 
 			default:

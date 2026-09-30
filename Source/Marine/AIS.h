@@ -45,6 +45,8 @@ namespace AIS
 		const int MIN_TRAINING_BITS = 4;
 
 		bool QuickReset = true;
+		bool ReportInvalid = false;
+		bool overrun = false; // frame ran past a length QuickReset would have stopped at
 		State state = State::TRAINING;
 
 		BIT lastBit = 0;
@@ -77,6 +79,12 @@ namespace AIS
 			channel = c;
 			station = s;
 			own_mmsi = o;
+		}
+
+		void setValidation(bool report_invalid, bool quick_reset)
+		{
+			ReportInvalid = report_invalid;
+			QuickReset = quick_reset;
 		}
 
 		void Receive(const FLOAT32 *data, int len, TAG &tag);
