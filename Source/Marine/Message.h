@@ -71,6 +71,7 @@ namespace AIS
 		long start_idx, end_idx;
 		int station;
 		int own_mmsi = -1;
+		bool invalid = false; // set by the RF decoder for frames that failed validation
 
 		std::vector<std::string> NMEA;
 		size_t nmea_count = 0;
@@ -288,6 +289,8 @@ namespace AIS
 		void setOwnMMSI(int m) { own_mmsi = m; }
 		void buildNMEA(TAG &tag, int id = -1);
 		bool isOwn() const { return own_mmsi == mmsi(); }
+		void setInvalid(bool b) { invalid = b; }
+		bool isInvalid() const { return invalid; }
 
 		uint64_t getHash() const
 		{

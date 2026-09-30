@@ -225,6 +225,17 @@ const int CPR_POSITION_UNDEFINED = -1;
 const int MESSAGE_ERROR_NONE = 0;
 const int MESSAGE_ERROR_NOTOK = 1;
 const int MESSAGE_ERROR_NMEA_CHECKSUM = 2;
+// CRC-valid RF frame that failed structural validation (model setting REPORT_INVALID);
+// always combined with exactly one of the reason bits below
+const int MESSAGE_ERROR_INVALID = 4;
+const int MESSAGE_ERROR_INVALID_SHORT = 8;	 // fewer than 38 bits, type and MMSI incomplete
+const int MESSAGE_ERROR_INVALID_TYPE = 16;	 // type 0 or 29..63
+const int MESSAGE_ERROR_INVALID_LENGTH = 32; // shorter than the minimum for its type
+const int MESSAGE_ERROR_INVALID_MMSI = 64;	 // MMSI above 999999999
+// valid frame that ran past the maximum length for its type (QUICK_RESET off)
+const int MESSAGE_ERROR_OVERSIZED = 128;
+const int MESSAGE_ERROR_DECODER = MESSAGE_ERROR_INVALID | MESSAGE_ERROR_INVALID_SHORT | MESSAGE_ERROR_INVALID_TYPE |
+								  MESSAGE_ERROR_INVALID_LENGTH | MESSAGE_ERROR_INVALID_MMSI | MESSAGE_ERROR_OVERSIZED;
 
 struct TAG
 {
