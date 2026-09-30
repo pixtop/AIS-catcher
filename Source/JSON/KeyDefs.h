@@ -26,7 +26,7 @@
 X(KEY_CLASS, "class", "class", "class", "", "", "class", "", "AIS message class", nullptr)
 X(KEY_DEVICE, "device", "device", "device", "", "", "device", "", "Device identifier", nullptr)
 X(KEY_DRIVER, "driver", "driver", "driver", "", "", "driver", "", "Numeric device driver identifier used to receive this message.", nullptr)
-X(KEY_ERROR, "error", "error", "error", "", "", "", "", "", &LookupTable_message_error_types)
+X(KEY_ERROR, "error", "error", "error", "", "", "", "", "Error flags: 2 NMEA checksum, 4 invalid frame (with 8 short, 16 type, 32 length or 64 MMSI), 128 oversized", &LookupTable_message_error_types)
 X(KEY_SCALED, "scaled", "", "scaled", "", "", "", "", "Scaled-output flag (true=engineering units).", nullptr)
 X(KEY_CHANNEL, "channel", "channel", "channel", "", "", "", "", "VHF channel (A or B).", nullptr)
 X(KEY_HARDWARE, "hardware", "hardware", "hardware", "", "", "hardware", "", "Hardware/device product name reported by the driver.", nullptr)

@@ -144,7 +144,7 @@ static void Usage()
 	Info() << "";
 	Info() << "\tModel specific settings:";
 	Info() << "";
-	Info() << "\t[-go Model: AFC_WIDE [on/off] FP_DS [on/off] PS_EMA [on/off] SOXR [on/off] SRC [on/off] DROOP [on/off] ]";
+	Info() << "\t[-go Model: AFC_WIDE [on/off] FP_DS [on/off] PS_EMA [on/off] SOXR [on/off] SRC [on/off] DROOP [on/off] REPORT_INVALID [on/off] QUICK_RESET [on/off] ]";
 }
 
 static void printBuildConfiguration()
