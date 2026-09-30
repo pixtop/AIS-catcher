@@ -14,6 +14,7 @@
 #include "Writer.h"
 
 #include <cstdio>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -39,6 +40,7 @@ struct Out
 	int error = 0;
 	bool invalid = false;
 	std::string nmea_json, full_json;
+	std::shared_ptr<AIS::Message> msg;
 
 	bool has(const std::string &s) const { return full_json.find(s) != std::string::npos; }
 	bool nmea_has(const std::string &s) const { return nmea_json.find(s) != std::string::npos; }
@@ -55,6 +57,7 @@ struct MessageSink : public StreamIn<AIS::Message>
 		out->length = d->getLength();
 		out->error = (int)tag.error;
 		out->invalid = d->isInvalid();
+		out->msg = std::make_shared<AIS::Message>(*d);
 		out->nmea_json.clear();
 		d->getNMEAJSON(out->nmea_json, tag);
 	}
@@ -178,6 +181,7 @@ static void defaults()
 	CHECK(o.sent && o.type == 1 && o.mmsi == 244123456 && o.error == 0 && !o.invalid);
 	CHECK(o.nmea_json.find("\"error\"") == std::string::npos);
 	CHECK(o.nmea_has("\"mmsi\":244123456,\"type\":1"));
+	CHECK(o.has("\"mmsi\":244123456") && o.has("\"lat\"") && !o.has("\"error\""));
 
 	current = "D8 0-bit frames expose bits left by the previous frame";
 	o = rx.send(0, 0, 0);
@@ -234,6 +238,7 @@ static void report_invalid()
 	current = "R1 valid frame unchanged";
 	o = rx.send(1, 244123456, 168);
 	CHECK(o.sent && o.type == 1 && o.mmsi == 244123456 && o.error == 0 && !o.invalid);
+	CHECK(!o.nmea_has("\"error\"") && !o.has("\"error\"") && o.has("\"lat\""));
 
 	current = "R2/R3 unknown types";
 	const unsigned types[] = {0, 29, 45, 63};
@@ -242,15 +247,21 @@ static void report_invalid()
 		o = rx.send(t, 244123456, 72);
 		CHECK(o.sent && o.type == t && o.mmsi == 244123456 && o.invalid);
 		CHECK(o.error == (MESSAGE_ERROR_INVALID | MESSAGE_ERROR_INVALID_TYPE));
+		CHECK(o.nmea_has("\"error\":20") && o.nmea_has("\"type\":" + std::to_string(t)));
+		CHECK(o.has("\"error\":20") && o.has("\"mmsi\":244123456"));
 	}
 
 	current = "R4 type 0, 7 bits";
 	o = rx.send(0, 0, 7);
 	CHECK(o.sent && o.length == 7 && o.error == (MESSAGE_ERROR_INVALID | MESSAGE_ERROR_INVALID_SHORT));
+	CHECK(o.nmea_has("\"error\":12") && !o.nmea_has("\"mmsi\"") && !o.nmea_has("\"type\""));
+	CHECK(o.has("\"error\":12") && !o.has("\"mmsi\"") && !o.has("\"type\""));
 
 	current = "R5 below minimum length";
 	o = rx.send(1, 244123456, 100);
 	CHECK(o.sent && o.invalid && o.error == (MESSAGE_ERROR_INVALID | MESSAGE_ERROR_INVALID_LENGTH));
+	CHECK(o.nmea_has("\"error\":36") && o.nmea_has("\"mmsi\":244123456"));
+	CHECK(o.has("\"type\":1") && o.has("\"mmsi\":244123456") && !o.has("\"lat\"") && !o.has("\"speed\""));
 
 	current = "R6 20-bit frame after a long frame: no stale bits";
 	rx.send(5, 227006760, 424);
@@ -279,6 +290,7 @@ static void report_invalid()
 	o = rx.send(1, 1073741823, 168);
 	CHECK(o.sent && o.invalid && o.mmsi == 1073741823);
 	CHECK(o.error == (MESSAGE_ERROR_INVALID | MESSAGE_ERROR_INVALID_MMSI));
+	CHECK(o.nmea_has("\"error\":68") && o.has("\"error\":68") && o.has("\"lat\""));
 
 	current = "R11 one bit oversized is below the QuickReset limit";
 	o = rx.send(1, 244123456, 169);
@@ -289,6 +301,7 @@ static void report_invalid()
 	CHECK(o.sent && !o.invalid && o.error == MESSAGE_ERROR_OVERSIZED);
 	o = rx.send(10, 244123456, 80);
 	CHECK(o.sent && !o.invalid && o.error == MESSAGE_ERROR_OVERSIZED);
+	CHECK(o.nmea_has("\"error\":128") && o.has("\"error\":128"));
 
 	current = "R15 flags do not leak into the next frame";
 	rx.send(45, 244123456, 72);
@@ -341,12 +354,58 @@ static void quick_reset_off()
 	CHECK(!rx.send(45, 244123456, 72).sent);
 }
 
+static bool passes(AIS::Filter &f, AIS::Message m)
+{
+	m.setRxTimeUnix(1000);
+	return f.include(m);
+}
+
+static void filter()
+{
+	Receiver rx(true, false);
+	const AIS::Message valid = *rx.send(1, 244123456, 168).msg;
+	const AIS::Message truncated = *rx.send(1, 244123456, 100).msg; // same MMSI, INVALID/LENGTH
+	const AIS::Message type33 = *rx.send(33, 244123456, 72).msg;
+
+	current = "T2 filter off passes invalid frames";
+	{
+		AIS::Filter f;
+		CHECK(passes(f, truncated) && passes(f, type33));
+	}
+
+	current = "T2 ALLOW_TYPE 1 does not alias type 33";
+	{
+		AIS::Filter f;
+		f.SetOptionKey(AIS::KEY_SETTING_FILTER, "on");
+		f.SetOptionKey(AIS::KEY_SETTING_ALLOW_TYPE, "1");
+		CHECK(passes(f, valid) && !passes(f, type33));
+	}
+
+	current = "T2 POSITION_INTERVAL not fed by invalid frames";
+	{
+		AIS::Filter f;
+		f.SetOptionKey(AIS::KEY_SETTING_POSITION_INTERVAL, "60");
+		CHECK(passes(f, truncated));
+		CHECK(passes(f, valid));
+		CHECK(!passes(f, valid)); // control: the history does work
+	}
+
+	current = "T2 REMOVE_INVALID";
+	{
+		AIS::Filter f;
+		f.SetOptionKey(AIS::KEY_SETTING_FILTER, "on");
+		f.SetOptionKey(AIS::KEY_SETTING_REMOVE_INVALID, "on");
+		CHECK(passes(f, valid) && !passes(f, truncated) && !passes(f, type33));
+	}
+}
+
 int main()
 {
 	defaults();
 	report_invalid();
 	report_invalid_quick_reset();
 	quick_reset_off();
+	filter();
 
 	if (failures)
 	{

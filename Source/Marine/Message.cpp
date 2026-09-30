@@ -148,6 +148,12 @@ namespace AIS
 			w.append_int((long long)tag.ipv4);
 		}
 
+		if (tag.error != MESSAGE_ERROR_NONE)
+		{
+			w.append_lit(",\"error\":");
+			w.append_int((long long)tag.error);
+		}
+
 		if (tag.mode & 1)
 		{
 			w.append_lit(",\"signalpower\":");
@@ -168,7 +174,7 @@ namespace AIS
 			w.append_int((long long)getStation());
 		}
 
-		if (getLength() > 0)
+		if (getLength() > 0 && !(tag.error & MESSAGE_ERROR_INVALID_SHORT))
 		{
 			w.append_lit(",\"mmsi\":");
 			w.append_int((long long)mmsi());
@@ -930,6 +936,9 @@ namespace AIS
 		case AIS::KEY_SETTING_REMOVE_EMPTY:
 			remove_empty = Util::Parse::Switch(arg);
 			return true;
+		case AIS::KEY_SETTING_REMOVE_INVALID:
+			remove_invalid = Util::Parse::Switch(arg);
+			return true;
 		default:
 			return false;
 		}
@@ -1014,7 +1023,11 @@ namespace AIS
 
 	bool Filter::include(const Message &msg)
 	{
-		if (own_interval && msg.isOwn())
+		// frames that failed validation must not update the histories below: a junk
+		// frame carrying a real MMSI would suppress that vessel's next genuine report
+		const bool invalid = msg.isInvalid();
+
+		if (own_interval && !invalid && msg.isOwn())
 		{
 			if (msg.getRxTimeUnix() - last_VDO < own_interval)
 			{
@@ -1026,7 +1039,7 @@ namespace AIS
 		// Position downsampling for types 1, 2, 3
 		bool old_position = false;
 
-		if (position_interval > 0)
+		if (position_interval > 0 && !invalid)
 		{
 			unsigned msg_type = msg.type();
 			if (msg_type == 1 || msg_type == 2 || msg_type == 3 || msg_type == 18 || msg_type == 27)
@@ -1039,7 +1052,7 @@ namespace AIS
 			}
 		}
 
-		if (unique_interval > 0 && !old_position)
+		if (unique_interval > 0 && !old_position && !invalid)
 		{
 			if (!duplicate_history.check(msg.getHash(), (uint32_t)msg.getRxTimeUnix(), unique_interval))
 			{
@@ -1058,6 +1071,9 @@ namespace AIS
 			if (msg.getLength() == 0)
 				return false;
 		}
+
+		if (remove_invalid && invalid)
+			return false;
 
 		bool ID_ok = true;
 		if (ID_allowed.size())
@@ -1127,10 +1143,11 @@ namespace AIS
 			}
 		}
 
-		unsigned type = msg.type() & 31;
+		unsigned type = msg.type();
 		unsigned repeat = msg.repeat() & 3;
 
-		bool type_ok = ((1U << type) & allow) != 0;
+		// types 32..63 only occur in invalid frames and match no ALLOW/BLOCK_TYPE bit
+		bool type_ok = type < 32 ? ((1U << type) & allow) != 0 : allow == all;
 		bool repeat_ok = ((1U << repeat) & allow_repeat) != 0;
 
 		if (!(type_ok && repeat_ok))

@@ -1118,6 +1118,10 @@ std::string DB::getBinaryMessagesJSON(std::time_t since)
 
 void DB::Receive(const JSON::JSON *data, int len, TAG &tag)
 {
+	// frames that failed validation must not create or move ships
+	if (((AIS::Message *)data[0].binary)->isInvalid())
+		return;
+
 	if (!filter.include(*(AIS::Message *)data[0].binary))
 		return;
 

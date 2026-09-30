@@ -774,7 +774,7 @@ namespace IO
 	{
 		AIS::Message &ais = *((AIS::Message *)data[0].binary);
 
-		if (filter.include(ais))
+		if (!ais.isInvalid() && filter.include(ais))
 		{
 
 			switch (ais.type())

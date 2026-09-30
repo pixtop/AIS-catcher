@@ -475,7 +475,7 @@ namespace IO
 		const JSON::JSON &json = data[0];
 		const AIS::Message &msg = *(AIS::Message *)json.binary;
 
-		if (!filter.include(msg))
+		if (msg.isInvalid() || !filter.include(msg))
 			return;
 
 		QueuedEntry entry;

@@ -345,6 +345,7 @@ namespace AIS
 		DuplicateHistory duplicate_history;
 
 		bool remove_empty = false;
+		bool remove_invalid = false;
 
 	public:
 		virtual ~Filter() {}

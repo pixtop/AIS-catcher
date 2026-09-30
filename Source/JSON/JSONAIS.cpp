@@ -1135,7 +1135,8 @@ namespace AIS
 			json.Add(AIS::KEY_STATION_ID, msg.getStation());
 		}
 
-		if (msg.getLength() > 0)
+		// a frame shorter than 38 bits has no complete type/MMSI header
+		if (msg.getLength() > 0 && !(tag.error & MESSAGE_ERROR_INVALID_SHORT))
 		{
 			U(msg, AIS::KEY_TYPE, 0, 6);
 			U(msg, AIS::KEY_REPEAT, 6, 2);
@@ -1146,6 +1147,10 @@ namespace AIS
 				COUNTRY(msg);
 			}
 		}
+
+		// fields past the end of a truncated frame would decode as zeros
+		if (tag.error & (MESSAGE_ERROR_INVALID_SHORT | MESSAGE_ERROR_INVALID_LENGTH))
+			return;
 
 		switch (msg.type())
 		{
