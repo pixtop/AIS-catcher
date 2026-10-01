@@ -1,0 +1,9 @@
+# .git stays in the context: CMake reads the commit hash for the version string
+build/
+**/build/
+NMEA2000/
+frontend/src/node_modules/
+frontend/dist/
+python/
+msvc/
+*.o
