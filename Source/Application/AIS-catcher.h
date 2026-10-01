@@ -22,7 +22,7 @@
 #define COPYRIGHT	   "jvde-github and other contributors"
 
 #ifndef VERSION_DESCRIBE
-#define VERSION_DESCRIBE	"v0.00-1-unknown"
+#define VERSION_DESCRIBE	VERSION "-custom-unknown"
 #endif
 
 #define AISCATCHER_URL "185.77.96.227"

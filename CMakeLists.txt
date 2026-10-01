@@ -27,11 +27,19 @@ else()
     set(COMMIT_HASH "unknown")
 endif()
 
+# Marks builds that carry local patches on top of the upstream base version
+set(VERSION_SUFFIX "custom" CACHE STRING "Tag added after the base version, empty for none")
+if(VERSION_SUFFIX)
+    set(VERSION_TAG "${VERSION_BASE}-${VERSION_SUFFIX}")
+else()
+    set(VERSION_TAG "${VERSION_BASE}")
+endif()
+
 # Build version string
 if(RUN_NUMBER GREATER 0)
-    set(VERSION_DESCRIBE "${VERSION_BASE}-${RUN_NUMBER}-g${COMMIT_HASH}")
+    set(VERSION_DESCRIBE "${VERSION_TAG}-${RUN_NUMBER}-g${COMMIT_HASH}")
 else()
-    set(VERSION_DESCRIBE "${VERSION_BASE}-0-g${COMMIT_HASH}")
+    set(VERSION_DESCRIBE "${VERSION_TAG}-0-g${COMMIT_HASH}")
 endif()
 
 message(STATUS "Version: ${VERSION_DESCRIBE} (base: ${VERSION_BASE}, run: ${RUN_NUMBER}, commit: ${COMMIT_HASH})")
