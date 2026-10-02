@@ -1,0 +1,17 @@
+{
+  "config": "aiscatcher",
+  "version": 1,
+  "sharing": false,
+  "input": "soapysdr",
+  "soapysdr": {
+    "device": "driver=LiteXM2SDR,path=/dev/m2sdr0",
+    "sample_rate": 1536000
+  },
+  "model": {
+    "report_invalid": "on",
+    "quick_reset": "off"
+  },
+  "udp": [
+    { "host": "192.0.2.10", "port": 10110, "msgformat": "JSON_NMEA" }
+  ]
+}

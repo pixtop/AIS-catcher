@@ -1,17 +1,16 @@
-# AIS-catcher built from this source tree with SoapySDR and the LiteX-M2SDR Soapy module.
+# AIS-catcher built from this source tree with SoapySDR and the LiteX-M2SDR Soapy module,
+# configured by a JSON config file mounted into the container.
 #
 # The m2sdr kernel driver is not part of the image: build and load it on the host
-# (litex_m2sdr/software/kernel), then pass the device node to the container:
+# (litex_m2sdr/software/kernel), then pass the device node and the config file to the container
+# (docker/aiscatcher.json is an example):
 #
 #   docker build -t ais-catcher-m2sdr .
-#   docker run --rm --device /dev/m2sdr0 ais-catcher-m2sdr
+#   docker run -d --restart unless-stopped --device /dev/m2sdr0 \
+#       -v /etc/aiscatcher:/etc/aiscatcher:ro ais-catcher-m2sdr
 #
-# Arguments starting with '-' are appended to the M2SDR input set up by the entrypoint:
-#
-#   docker run --rm --device /dev/m2sdr0 ais-catcher-m2sdr \
-#       -go REPORT_INVALID on QUICK_RESET off -u 192.0.2.10 10110 MSGFORMAT JSON_NMEA
-#
-# Anything else runs as a command, e.g. to check the board is visible:
+# The entrypoint runs AIS-catcher -X off -C $AISCATCHER_CONFIG; arguments starting with '-'
+# are appended (e.g. -v 60). Anything else runs as a command, e.g. to check the board:
 #
 #   docker run --rm --device /dev/m2sdr0 ais-catcher-m2sdr SoapySDRUtil --probe=driver=LiteXM2SDR
 #   docker run --rm --device /dev/m2sdr0 ais-catcher-m2sdr m2sdr_util -d /dev/m2sdr0 info
@@ -58,10 +57,7 @@ RUN apt-get update && \
 
 COPY --from=build /staging/ /
 
-# input used by the entrypoint; M2SDR_ARGS adds SoapySDR device arguments,
-# e.g. M2SDR_ARGS=auto_bandwidth=on,rx_agc_mode=slow
-ENV M2SDR_DEVICE=/dev/m2sdr0 \
-    M2SDR_ARGS= \
-    SAMPLE_RATE=1536000
+# config file read by the entrypoint; mount it (or its directory) from the host
+ENV AISCATCHER_CONFIG=/etc/aiscatcher/aiscatcher.json
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
