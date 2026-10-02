@@ -1,0 +1,69 @@
+# Podman quadlet: AIS-catcher on the LiteX-M2SDR as a systemd service.
+#
+# Prerequisites on the host:
+#   - m2sdr kernel driver installed with its udev rule (litex_m2sdr/software/kernel: make install),
+#     which loads at boot and makes /dev/m2sdr* mode 0666, so the container needs no privileges
+#   - the image, built from this repository: podman build -t ais-catcher-m2sdr .
+#   - the config: /etc/aiscatcher/aiscatcher.json, readable by all (docker/aiscatcher.json is an example)
+#
+# Install (rootful):
+#   cp docker/ais-catcher.container /etc/containers/systemd/
+#   systemctl daemon-reload
+#   systemctl start ais-catcher
+#   journalctl -u ais-catcher -f
+#
+# The [Install] section enables it at boot once generated; there is no separate "systemctl enable".
+# After editing the config: systemctl restart ais-catcher
+
+[Unit]
+Description=AIS-catcher AIS receiver on LiteX-M2SDR
+Documentation=https://github.com/jvde-github/AIS-catcher
+Wants=network-online.target
+After=network-online.target systemd-modules-load.service
+# a sensor should keep retrying: no limit on restarts
+StartLimitIntervalSec=0
+
+[Container]
+Image=localhost/ais-catcher-m2sdr:latest
+ContainerName=ais-catcher
+# locally built image; never try a registry
+Pull=never
+
+AddDevice=/dev/m2sdr0
+
+# config directory, read-only; :Z gives it a private SELinux label (no effect without SELinux)
+Volume=/etc/aiscatcher:/etc/aiscatcher:ro,Z
+Environment=AISCATCHER_CONFIG=/etc/aiscatcher/aiscatcher.json
+# AIS-catcher lists SoapySDR devices at startup, and the LiteX module then probes for Ethernet
+# boards at 192.168.1.50:1234 by default; keep that probe inside the container.
+# For an Ethernet-attached M2SDR, set its address here instead.
+Environment=LITEXM2SDR_ETH_IPS=127.0.0.1
+
+# least privilege: unprivileged user, no capabilities, read-only root filesystem
+User=65534
+Group=65534
+DropCapability=ALL
+NoNewPrivileges=true
+ReadOnly=true
+
+# outbound UDP/TCP feeds work on the default network; for a feed to a service on this host's
+# loopback, or for the web viewer, use host networking or publish the port instead:
+#Network=host
+#PublishPort=8100:8100
+
+# extra AIS-catcher arguments, appended after the config file (e.g. statistics every 60 s)
+#Exec=-v 60
+
+# SELinux hosts: allow containers to use devices with
+#   setsebool -P container_use_devices=true
+# or, less strict, disable labelling for this container only:
+#SecurityLabelDisable=true
+
+[Service]
+# udev creates the device node shortly after the driver loads; wait for it at boot
+ExecStartPre=/usr/bin/timeout 60 /bin/sh -c 'until [ -c /dev/m2sdr0 ]; do sleep 1; done'
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

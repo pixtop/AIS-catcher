@@ -14,6 +14,8 @@
 #
 #   docker run --rm --device /dev/m2sdr0 ais-catcher-m2sdr SoapySDRUtil --probe=driver=LiteXM2SDR
 #   docker run --rm --device /dev/m2sdr0 ais-catcher-m2sdr m2sdr_util -d /dev/m2sdr0 info
+#
+# To run it as a systemd service with podman, see docker/ais-catcher.container (quadlet).
 
 ARG DEBIAN_RELEASE=bookworm
 
@@ -57,7 +59,11 @@ RUN apt-get update && \
 
 COPY --from=build /staging/ /
 
-# config file read by the entrypoint; mount it (or its directory) from the host
-ENV AISCATCHER_CONFIG=/etc/aiscatcher/aiscatcher.json
+# config file read by the entrypoint; mount it (or its directory) from the host.
+# AIS-catcher lists SoapySDR devices at startup, and the LiteX module then probes for Ethernet
+# boards at 192.168.1.50:1234; keep that probe inside the container (set the board's address
+# here for an Ethernet-attached M2SDR).
+ENV AISCATCHER_CONFIG=/etc/aiscatcher/aiscatcher.json \
+    LITEXM2SDR_ETH_IPS=127.0.0.1
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
